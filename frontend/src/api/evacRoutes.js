@@ -172,6 +172,8 @@ export function routeSummaryForFire(fireId) {
   if (!r) return null
   return {
     destination: r.properties.destination_name,
+    destination_lat: r.properties.destination_lat,
+    destination_lon: r.properties.destination_lon,
     distance_km: r.properties.distance_km,
     duration_min: r.properties.duration_min,
     traffic_severity: r.properties.traffic_severity,

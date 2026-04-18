@@ -1,7 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import FireMap from './FireMap'
 import DispatchPanel from './DispatchPanel'
 import RegisterModal from './RegisterModal'
+import StatusPill from './StatusPill'
+import AlertBanner from './AlertBanner'
+import { fetchDispatchData } from './api/dispatch'
 
 export default function App() {
   // Selection + theme are owned at the app level so the map and the side
@@ -10,6 +13,41 @@ export default function App() {
   const [selectedFire, setSelectedFire] = useState(null)
   const [theme, setTheme] = useState('light')
   const [registerOpen, setRegisterOpen] = useState(false)
+  const [fireCount, setFireCount] = useState(null)
+  const [lastUpdated, setLastUpdated] = useState(null)
+  const [activeAlert, setActiveAlert] = useState(null)
+  const announcedRef = useRef(new Set())
+
+  // When fires arrive, surface the highest-confidence "alert sent" event as a
+  // banner. Once #30 wires the WebSocket this driver is replaced by an
+  // alert_sent message handler — same setActiveAlert call.
+  const handleFiresLoaded = async (collection) => {
+    const fires = collection?.features || []
+    setFireCount(fires.length)
+    setLastUpdated(Date.now())
+    if (!fires.length) return
+    // Pick the most populous at-risk fire and check whether it would have
+    // alerted (confidence >= 0.65). One banner per fire per session.
+    const ranked = [...fires].sort(
+      (a, b) => (b.properties.population_at_risk || 0) - (a.properties.population_at_risk || 0),
+    )
+    for (const fire of ranked) {
+      const id = fire.properties?.fire_id
+      if (!id || announcedRef.current.has(id)) continue
+      const data = await fetchDispatchData(fire)
+      if (data && data.confidence >= 0.65 && data.alerts_sent > 0) {
+        announcedRef.current.add(id)
+        setActiveAlert({
+          fire_id: id,
+          fire_name: fire.properties.name,
+          alerts_sent: data.alerts_sent,
+          audit_hash: data.audit_hash,
+        })
+        return
+      }
+    }
+  }
+
   const dark = theme === 'dark'
   return (
     <>
@@ -18,7 +56,10 @@ export default function App() {
         onSelectFire={setSelectedFire}
         theme={theme}
         onThemeChange={setTheme}
+        onFiresLoaded={handleFiresLoaded}
       />
+      <StatusPill fireCount={fireCount} lastUpdated={lastUpdated} theme={theme} />
+      <AlertBanner alert={activeAlert} onDismiss={() => setActiveAlert(null)} theme={theme} />
       <DispatchPanel
         fire={selectedFire}
         onClose={() => setSelectedFire(null)}

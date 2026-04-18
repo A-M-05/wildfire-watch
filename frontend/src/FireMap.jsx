@@ -26,7 +26,7 @@ const STYLES = {
   dark: 'mapbox://styles/mapbox/dark-v11',
 }
 
-export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChange }) {
+export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChange, onFiresLoaded }) {
   const containerRef = useRef(null)
   const mapRef = useRef(null)
   const stationsRef = useRef(null)
@@ -225,6 +225,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       const zones = buildAlertZones(fires)
       firesRef.current = fires
       zonesRef.current = zones
+      if (onFiresLoaded) onFiresLoaded(fires)
       if (map.isStyleLoaded()) {
         const fireSrc = map.getSource('active-fires')
         if (fireSrc) fireSrc.setData(fires)
