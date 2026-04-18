@@ -64,11 +64,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       source: 'fire-stations',
       paint: {
         'circle-radius': 7,
-        'circle-color': [
-          'case',
-          ['==', ['get', 'available'], true], '#22cc44',
-          '#ff3322',
-        ],
+        'circle-color': '#22cc44',
         'circle-stroke-width': 1.5,
         'circle-stroke-color': '#ffffff',
       },
@@ -284,13 +280,12 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     map.on('mouseenter', 'fire-stations-circle', (e) => {
       map.getCanvas().style.cursor = 'pointer'
       const f = e.features[0]
-      const { name, station_id, available, units } = f.properties
+      const { name, station_id, units } = f.properties
       popup
         .setLngLat(f.geometry.coordinates)
         .setHTML(
           `<strong>${name}</strong><br/>` +
           `${station_id}<br/>` +
-          `Status: ${available === true || available === 'true' ? 'available' : 'deployed'}<br/>` +
           `Units: ${units}`
         )
         .addTo(map)
