@@ -4,7 +4,6 @@ from aws_cdk import (
     CfnOutput,
     Tags,
     aws_sns as sns,
-    aws_pinpoint as pinpoint,
     aws_ses as ses,
 )
 from constructs import Construct
@@ -15,29 +14,29 @@ SES_DISPATCHER_IDENTITY = "spammyrobot@gmail.com"
 
 
 class MessagingStack(Stack):
-    """Issue #4 — SNS topic, Pinpoint app (SMS), SES identity.
+    """Issue #4 — SNS topic + SES identity (Pinpoint dropped, see notes).
 
     Unblocks alert sender (#22), resident registration (#23), watershed alert (#24).
 
     Notes:
-      * Pinpoint's SMS channel must be enabled for two-way messaging from the
-        console after first deploy (AWS CLI can't toggle it). See README below.
-      * SES identity starts in the sandbox — only verified recipients can receive.
-        Fine for hackathon demo (we'll verify our own phones/emails).
+      * Pinpoint was originally planned for native GPS-radius SMS targeting,
+        but this account's SCP blocks `mobiletargeting:CreateApp`. The alert
+        sender Lambda (#22) instead queries the residents DynamoDB table for
+        residents within radius and calls `sns.publish(PhoneNumber=...)` per
+        resident. This needs the IAM permission `sns:Publish` on `*` (no
+        topic ARN), which #22 will add to its execution role.
+      * SES identity starts in the sandbox — only verified recipients can
+        receive. Fine for the demo (we'll verify our own emails).
     """
 
     def __init__(self, scope: Construct, id: str, **kwargs):
         super().__init__(scope, id, **kwargs)
 
-        for k, v in TAGS.items():
-            Tags.of(self).add(k, v)
-
         self._provision_sns()
-        self._provision_pinpoint()
         self._provision_ses()
 
     # ------------------------------------------------------------------
-    # SNS — broadcast alert topic
+    # SNS — broadcast alert topic (per-resident SMS goes via sns.publish PhoneNumber direct)
     # ------------------------------------------------------------------
 
     def _provision_sns(self):
@@ -47,39 +46,13 @@ class MessagingStack(Stack):
             display_name="Wildfire Watch Alerts",
         )
         self.alert_topic.apply_removal_policy(RemovalPolicy.DESTROY)
+        for k, v in TAGS.items():
+            Tags.of(self.alert_topic).add(k, v)
 
         CfnOutput(self, "AlertTopicArn",
             value=self.alert_topic.topic_arn,
             export_name="WildfireWatch::Messaging::AlertTopicArn",
             description="Env var: WW_SNS_ALERT_TOPIC_ARN",
-        )
-
-    # ------------------------------------------------------------------
-    # Pinpoint — SMS to residents by GPS radius
-    # ------------------------------------------------------------------
-
-    def _provision_pinpoint(self):
-        self.pinpoint_app = pinpoint.CfnApp(
-            self, "PinpointApp",
-            name="wildfire-watch",
-            tags=TAGS,
-        )
-        self.pinpoint_app.apply_removal_policy(RemovalPolicy.DESTROY)
-
-        # SMS channel — must also be enabled in the Pinpoint console on first
-        # deploy for two-way messaging + sender ID. CfnSMSChannel below turns
-        # on outbound SMS.
-        self.pinpoint_sms = pinpoint.CfnSMSChannel(
-            self, "PinpointSmsChannel",
-            application_id=self.pinpoint_app.ref,
-            enabled=True,
-        )
-        self.pinpoint_sms.add_dependency(self.pinpoint_app)
-
-        CfnOutput(self, "PinpointAppId",
-            value=self.pinpoint_app.ref,
-            export_name="WildfireWatch::Messaging::PinpointAppId",
-            description="Env var: WW_PINPOINT_APP_ID",
         )
 
     # ------------------------------------------------------------------
@@ -92,6 +65,8 @@ class MessagingStack(Stack):
             identity=ses.Identity.email(SES_DISPATCHER_IDENTITY),
         )
         self.ses_identity.apply_removal_policy(RemovalPolicy.DESTROY)
+        for k, v in TAGS.items():
+            Tags.of(self.ses_identity).add(k, v)
 
         CfnOutput(self, "SesDispatcherIdentity",
             value=SES_DISPATCHER_IDENTITY,

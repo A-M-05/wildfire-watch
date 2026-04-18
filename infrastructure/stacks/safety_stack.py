@@ -4,27 +4,33 @@ from aws_cdk import (
     CfnOutput,
     Tags,
     Duration,
-    aws_qldb as qldb,
+    aws_dynamodb as dynamodb,
     aws_iam as iam,
     aws_stepfunctions as sfn,
-    aws_stepfunctions_tasks as sfn_tasks,
 )
 from constructs import Construct
 
 TAGS = {"Project": "wildfire-watch", "Env": "hackathon"}
 
-LEDGER_NAME = "wildfire-watch-audit"
+AUDIT_TABLE_NAME = "wildfire-watch-audit"
 
 
 class SafetyStack(Stack):
-    """Issue #3 — QLDB ledger + Step Functions safety workflow skeleton.
+    """Issue #3 — Audit ledger (DynamoDB hash-chain) + Step Functions safety workflow.
+
+    Originally targeted QLDB; pivoted to DynamoDB because QLDB no longer accepts
+    new ledger creations on this account. The "immutable audit" property is
+    preserved by chaining each record's `prev_hash` into the next record's
+    `record_hash` — the chain is verified server-side by the safety gate Lambda
+    (#17) and any post-incident audit script.
 
     Provisions:
-      * QLDB ledger (`predictions` and `alerts` tables are created by the
-        safety gate Lambda on first write — see issue #17).
-      * Step Functions state machine skeleton with a confidence-gate Choice
-        state. The Lambda tasks are wired in issue #19 / #21.
-      * IAM role for Step Functions to invoke safety + alert Lambdas.
+      * DynamoDB `wildfire-watch-audit` table (PK: prediction_id, SK: written_at)
+        - Streams enabled (NEW_IMAGE) so a downstream verifier Lambda can re-hash
+        - GSI `fire_id-written_at-index` to fetch all records for a fire
+      * Step Functions skeleton with a confidence-gate Choice — Lambda tasks
+        get wired in #19 / #21.
+      * IAM role for Step Functions to invoke wildfire-watch-* Lambdas.
     """
 
     def __init__(self, scope: Construct, id: str, **kwargs):
@@ -33,28 +39,41 @@ class SafetyStack(Stack):
         for k, v in TAGS.items():
             Tags.of(self).add(k, v)
 
-        self._provision_qldb()
+        self._provision_audit_table()
         self._provision_step_functions_role()
         self._provision_state_machine()
 
     # ------------------------------------------------------------------
-    # QLDB
+    # DynamoDB audit ledger (hash-chain — see SKILL.md / issue #17)
     # ------------------------------------------------------------------
 
-    def _provision_qldb(self):
-        self.ledger = qldb.CfnLedger(
-            self, "AuditLedger",
-            name=LEDGER_NAME,
-            permissions_mode="STANDARD",
-            deletion_protection=False,
-            tags=[{"key": k, "value": v} for k, v in TAGS.items()],
+    def _provision_audit_table(self):
+        self.audit_table = dynamodb.Table(
+            self, "AuditTable",
+            table_name=AUDIT_TABLE_NAME,
+            partition_key=dynamodb.Attribute(name="prediction_id", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="written_at", type=dynamodb.AttributeType.STRING),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            stream=dynamodb.StreamViewType.NEW_IMAGE,
+            point_in_time_recovery=True,
         )
-        self.ledger.apply_removal_policy(RemovalPolicy.DESTROY)
 
-        CfnOutput(self, "QldbLedgerName",
-            value=self.ledger.name,
-            export_name="WildfireWatch::Safety::QldbLedgerName",
-            description="Env var: WW_QLDB_LEDGER",
+        # Lookup all audit records for a given fire (used by post-incident review)
+        self.audit_table.add_global_secondary_index(
+            index_name="fire_id-written_at-index",
+            partition_key=dynamodb.Attribute(name="fire_id", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="written_at", type=dynamodb.AttributeType.STRING),
+        )
+
+        CfnOutput(self, "AuditTableName",
+            value=self.audit_table.table_name,
+            export_name="WildfireWatch::Safety::AuditTableName",
+            description="Env var: WW_AUDIT_TABLE",
+        )
+        CfnOutput(self, "AuditTableStreamArn",
+            value=self.audit_table.table_stream_arn,
+            export_name="WildfireWatch::Safety::AuditTableStreamArn",
         )
 
     # ------------------------------------------------------------------
@@ -66,11 +85,9 @@ class SafetyStack(Stack):
             self, "SafetyStateMachineRole",
             role_name="wildfire-watch-safety-sfn-role",
             assumed_by=iam.ServicePrincipal("states.amazonaws.com"),
-            description="Step Functions role for safety workflow — invokes safety gate + alert Lambdas",
+            description="Step Functions role - invokes wildfire-watch Lambdas and reads audit ledger",
         )
 
-        # Lambdas are added to this stack in #19 / #21. Granting invoke on all
-        # project Lambdas now so cross-stack wiring doesn't require role edits.
         self.sfn_role.add_to_policy(iam.PolicyStatement(
             actions=["lambda:InvokeFunction"],
             resources=[
@@ -78,13 +95,8 @@ class SafetyStack(Stack):
             ],
         ))
 
-        # QLDB send-command for reading prediction records inside the workflow
-        self.sfn_role.add_to_policy(iam.PolicyStatement(
-            actions=["qldb:SendCommand"],
-            resources=[
-                f"arn:aws:qldb:{self.region}:{self.account}:ledger/{LEDGER_NAME}"
-            ],
-        ))
+        # Read-only on the audit ledger (the safety gate Lambda is the writer)
+        self.audit_table.grant_read_data(self.sfn_role)
 
         CfnOutput(self, "SafetyStateMachineRoleArn",
             value=self.sfn_role.role_arn,
@@ -96,7 +108,7 @@ class SafetyStack(Stack):
     # ------------------------------------------------------------------
 
     def _provision_state_machine(self):
-        # Placeholder Pass states — replaced by LambdaInvoke tasks in #19 / #21.
+        # Replaced by LambdaInvoke tasks in #19 / #21.
         safety_gate_placeholder = sfn.Pass(
             self, "SafetyGatePlaceholder",
             comment="Replaced by safety gate Lambda in #21",
@@ -105,15 +117,15 @@ class SafetyStack(Stack):
 
         auto_approve = sfn.Pass(
             self, "AutoApprove",
-            comment="Confidence >= 0.65 — proceed to alert sender (wired in #22)",
+            comment="confidence >= 0.65 — proceed to alert sender (wired in #22)",
         )
 
         human_review = sfn.Pass(
             self, "HumanReviewRequired",
-            comment="Confidence < 0.65 — pause for dispatcher approval (wired in #19)",
+            comment="confidence < 0.65 — pause for dispatcher approval (wired in #19)",
         )
 
-        # Confidence gate — the non-negotiable rule from CLAUDE.md
+        # Confidence gate — non-negotiable rule from CLAUDE.md
         confidence_choice = sfn.Choice(self, "ConfidenceGate") \
             .when(
                 sfn.Condition.number_greater_than_equals("$.confidence", 0.65),
