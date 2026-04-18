@@ -211,36 +211,57 @@ class SafetyStack(Stack):
     def _provision_state_machine(self):
         """Build the full safety workflow state machine.
 
-        Flow:
-          ConfidenceGate (Choice on $.recommendation.confidence)
-            ├─ >= 0.65 → SafetyGatePlaceholder → AutoApprove  [#21 wires safety gate here]
-            └─ < 0.65  → NotifyDispatcherAndWait (WAIT_FOR_TASK_TOKEN, 5-min heartbeat)
-                            ├─ approved (SendTaskSuccess) → AutoApprove
-                            └─ timeout/rejected           → EscalateAndAlert
+        Flow (Guardrails run on ALL paths — CLAUDE.md safety rule #2):
+          SafetyGate (LambdaInvoke — runs Bedrock advisory + Guardrails + audit write)
+            → ActionRouter (Choice on $.Payload.action)
+                 ├─ APPROVED               → AlertSender
+                 ├─ HUMAN_REVIEW_REQUIRED  → NotifyDispatcherAndWait (WAIT_FOR_TASK_TOKEN, 5-min)
+                 │                              ├─ approved → AlertSender
+                 │                              └─ timeout  → EscalateAndAlert → AlertSender
+                 └─ BLOCKED                → LogAndStop  (no SMS — advisory was unsafe)
 
-        The WAIT_FOR_TASK_TOKEN pattern: Step Functions pauses and hands the
-        dispatcher_notify Lambda a unique token. The Lambda sends it to the
-        dispatcher via SNS. The dispatcher (via UI or CLI) calls
-        sfn:SendTaskSuccess with that token to resume — or lets it expire
-        after 5 minutes to trigger auto-escalation.
+        Guardrails run inside the safety gate Lambda (#21) before the action is
+        determined, so PII stripping and false-certainty blocking apply to every
+        advisory — including low-confidence ones headed for human review.
         """
 
-        # Placeholder for the safety gate Lambda (#21) — replaced when #21 is wired.
-        # Pass state forwards the full input unchanged so downstream states
-        # can still read $.recommendation.confidence, $.fire_event, etc.
-        safety_gate_placeholder = sfn.Pass(
-            self, "SafetyGatePlaceholder",
-            comment="Replaced by safety gate LambdaInvoke in #21",
+        # Safety gate Lambda (#21) — the single choke point for every advisory.
+        # Returns: { "action": "APPROVED"|"HUMAN_REVIEW_REQUIRED"|"BLOCKED",
+        #            "prediction_id": str, "advisory": str, ... }
+        # Imported by name so this stack can deploy before #21 is merged to main.
+        safety_gate_fn = lambda_.Function.from_function_name(
+            self, "SafetyGateFn",
+            function_name="wildfire-watch-safety-gate",
         )
 
-        # Terminal states for dispatched alerts — placeholder for #22 (alert sender).
+        safety_gate = tasks.LambdaInvoke(
+            self, "SafetyGate",
+            lambda_function=safety_gate_fn,
+            payload=sfn.TaskInput.from_object({
+                "fire_event": sfn.JsonPath.string_at("$.fire_event"),
+                "recommendation": sfn.JsonPath.string_at("$.recommendation"),
+            }),
+            result_path="$.safety_gate_result",
+        )
+
+        # Terminal states — alert sender is a placeholder until #22 is wired.
         alert_sender = sfn.Pass(
             self, "AlertSender",
             comment="Replaced by alert sender LambdaInvoke in #22",
         )
 
-        # When no human responds within the heartbeat window, we escalate:
-        # dispatch anyway (fire waits for no one) and log the escalation.
+        # Blocked — advisory failed Guardrails; no SMS, no human override allowed.
+        log_and_stop = sfn.Pass(
+            self, "LogAndStop",
+            comment="Advisory blocked by Guardrails — no alert dispatched",
+            parameters={
+                "blocked": True,
+                "prediction_id.$": "$.safety_gate_result.Payload.prediction_id",
+                "fire_event.$": "$.fire_event",
+            },
+        )
+
+        # Auto-escalate when dispatcher doesn't respond within 5 minutes.
         escalate_and_alert = sfn.Pass(
             self, "EscalateAndAlert",
             comment="Heartbeat timeout — auto-escalate: dispatch without human approval",
@@ -251,27 +272,24 @@ class SafetyStack(Stack):
             },
         ).next(alert_sender)
 
-        # NotifyDispatcherAndWait — the human-in-the-loop gate.
-        # WAIT_FOR_TASK_TOKEN pauses execution until sfn:SendTaskSuccess/Failure.
-        # Heartbeat of 5 minutes: if no response, States.HeartbeatTimeout is raised
-        # and the catch handler routes to escalation.
+        # Human-in-the-loop gate — pauses until sfn:SendTaskSuccess/Failure.
+        # The dispatcher_notify Lambda sends the task token to the dispatcher via SNS
+        # and stores it in DynamoDB so the UI can resume without the CLI.
         notify_and_wait = tasks.LambdaInvoke(
             self, "NotifyDispatcherAndWait",
             lambda_function=self.dispatcher_notify_fn,
             integration_pattern=sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
             payload=sfn.TaskInput.from_object({
-                # sfn.JsonPath.task_token injects the pause token the dispatcher
-                # needs to call sfn:SendTaskSuccess to resume this execution.
                 "task_token": sfn.JsonPath.task_token,
                 "fire_event": sfn.JsonPath.string_at("$.fire_event"),
                 "recommendation": sfn.JsonPath.string_at("$.recommendation"),
+                # Pass the Guardrails-validated advisory so the dispatcher sees
+                # the same text that would be sent if they approve.
+                "advisory": sfn.JsonPath.string_at("$.safety_gate_result.Payload.advisory"),
             }),
-            # 5-minute heartbeat — if no SendTaskSuccess/Failure arrives, escalate.
             heartbeat=Duration.minutes(5),
             result_path="$.approval_result",
         )
-        # Route heartbeat timeout → auto-escalate. Any other error also escalates
-        # (fail-safe: when in doubt, dispatch rather than leave people unalerted).
         notify_and_wait.add_catch(
             escalate_and_alert,
             errors=["States.HeartbeatTimeout", "States.TaskFailed", "States.ALL"],
@@ -279,25 +297,29 @@ class SafetyStack(Stack):
         )
         notify_and_wait.next(alert_sender)
 
-        # Confidence gate — the non-negotiable 0.65 threshold from CLAUDE.md.
-        # Reads confidence from the dispatch recommendation in the input payload.
-        confidence_choice = sfn.Choice(self, "ConfidenceGate") \
+        # Route on the safety gate's action — three mutually exclusive paths.
+        action_router = sfn.Choice(self, "ActionRouter") \
             .when(
-                sfn.Condition.number_greater_than_equals("$.recommendation.confidence", 0.65),
-                safety_gate_placeholder.next(alert_sender),
+                sfn.Condition.string_equals("$.safety_gate_result.Payload.action", "APPROVED"),
+                alert_sender,
             ) \
-            .otherwise(notify_and_wait)
+            .when(
+                sfn.Condition.string_equals("$.safety_gate_result.Payload.action", "HUMAN_REVIEW_REQUIRED"),
+                notify_and_wait,
+            ) \
+            .otherwise(log_and_stop)  # BLOCKED or any unexpected value → stop
 
         self.state_machine = sfn.StateMachine(
             self, "SafetyStateMachine",
             state_machine_name="wildfire-watch-safety",
-            definition_body=sfn.DefinitionBody.from_chainable(confidence_choice),
+            definition_body=sfn.DefinitionBody.from_chainable(safety_gate.next(action_router)),
             role=self.sfn_role,
             timeout=Duration.minutes(15),
-            comment="Safety workflow: confidence gate + human review + auto-escalation",
+            comment="Safety workflow: Guardrails gate → APPROVED/HUMAN_REVIEW/BLOCKED routing",
         )
 
-        # Allow Step Functions to invoke the dispatcher notify Lambda.
+        # Allow Step Functions to invoke both Lambdas.
+        safety_gate_fn.grant_invoke(self.sfn_role)
         self.dispatcher_notify_fn.grant_invoke(self.sfn_role)
 
         CfnOutput(self, "SafetyStateMachineArn",
