@@ -1,6 +1,7 @@
 import aws_cdk as cdk
 from stacks.core_stack import CoreStack
 from stacks.safety_stack import SafetyStack
+from stacks.messaging_stack import MessagingStack
 
 app = cdk.App()
 
@@ -17,6 +18,11 @@ CoreStack(app, "WildfireWatchCore",
 SafetyStack(app, "WildfireWatchSafety",
     env=env,
     description="Wildfire Watch — QLDB ledger + Step Functions safety workflow (issue #3)",
+)
+
+MessagingStack(app, "WildfireWatchMessaging",
+    env=env,
+    description="Wildfire Watch — SNS, Pinpoint, SES (issue #4)",
 )
 
 app.synth()
