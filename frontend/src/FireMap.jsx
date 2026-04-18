@@ -26,7 +26,7 @@ const STYLES = {
   dark: 'mapbox://styles/mapbox/dark-v11',
 }
 
-export default function FireMap() {
+export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChange }) {
   const containerRef = useRef(null)
   const mapRef = useRef(null)
   const stationsRef = useRef(null)
@@ -36,10 +36,13 @@ export default function FireMap() {
   const destsRef = useRef(null)
   const didInitTheme = useRef(false)
   const [error, setError] = useState(null)
-  const [theme, setTheme] = useState('light')
-  // Click a fire to toggle its evac route. Single-select keeps the map readable
-  // (a dozen overlapping routes turns into spaghetti). null = no route shown.
-  const [selectedFireId, setSelectedFireId] = useState(null)
+  const setTheme = (next) => {
+    onThemeChange((prev) => (typeof next === 'function' ? next(prev) : next))
+  }
+  // Selection is lifted to App so the dispatch panel can read it. We derive
+  // the id locally for the evac filter; click handlers report the full feature
+  // back up via onSelectFire.
+  const selectedFireId = selectedFire?.properties?.fire_id ?? null
   const selectedFireIdRef = useRef(null)
   selectedFireIdRef.current = selectedFireId
 
@@ -372,14 +375,19 @@ export default function FireMap() {
     // Click a fire footprint to toggle its evac route. Click again on the same
     // fire (or any empty space) to hide it. Single-fire selection only.
     map.on('click', 'fires-fill', (e) => {
-      const id = e.features[0]?.properties?.fire_id
-      if (!id) return
+      const f = e.features[0]
+      if (!f?.properties?.fire_id) return
       e.originalEvent.__fireClick = true   // suppress the empty-space deselect below
-      setSelectedFireId((prev) => (prev === id ? null : id))
+      // queryRenderedFeatures returns a flat clone — find the matching feature
+      // in firesRef so the panel gets the full property bag (centroid, etc.)
+      const full = firesRef.current?.features?.find(
+        (x) => x.properties.fire_id === f.properties.fire_id,
+      ) || f
+      onSelectFire((prev) => (prev?.properties?.fire_id === full.properties.fire_id ? null : full))
     })
     map.on('click', (e) => {
       if (e.originalEvent.__fireClick) return
-      setSelectedFireId(null)
+      onSelectFire(null)
     })
 
     return () => {
@@ -428,20 +436,27 @@ export default function FireMap() {
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
       <button
         onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+        aria-label={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+        title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
         style={{
-          position: 'absolute', top: 12, right: 12, padding: '8px 12px',
+          position: 'absolute', top: 12, left: 12, width: 36, height: 36,
           background: theme === 'light' ? '#1a1a1a' : '#f5f5f5',
           color: theme === 'light' ? '#f5f5f5' : '#1a1a1a',
-          border: 'none', borderRadius: 4, cursor: 'pointer',
-          fontFamily: 'monospace', fontSize: 13, fontWeight: 600,
-          boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+          border: 'none', borderRadius: '50%', cursor: 'pointer',
+          padding: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
+          transition: 'transform 0.25s ease',
+          zIndex: 6,
         }}
+        onMouseEnter={(e) => (e.currentTarget.style.transform = 'rotate(20deg)')}
+        onMouseLeave={(e) => (e.currentTarget.style.transform = 'rotate(0)')}
       >
-        {theme === 'light' ? 'Dark' : 'Light'}
+        {theme === 'light' ? <MoonIcon /> : <SunIcon />}
       </button>
       {error && (
         <div style={{
-          position: 'absolute', top: 12, left: 12, padding: '8px 12px',
+          position: 'absolute', top: 56, left: 12, padding: '8px 12px',
           background: 'rgba(180, 30, 30, 0.9)', color: '#fff', borderRadius: 4,
           fontFamily: 'monospace', fontSize: 13,
         }}>
@@ -449,5 +464,25 @@ export default function FireMap() {
         </div>
       )}
     </div>
+  )
+}
+
+function SunIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true">
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+    </svg>
+  )
+}
+
+function MoonIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"
+      aria-hidden="true">
+      <path d="M20.5 14.3a8 8 0 1 1-10.8-10.8 8 8 0 0 0 10.8 10.8z" />
+    </svg>
   )
 }
