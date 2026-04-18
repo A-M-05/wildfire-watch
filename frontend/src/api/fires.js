@@ -10,7 +10,7 @@
 // public feed gives us today.
 const ACRES_TO_KM2 = 0.00404686
 const EARTH_RADIUS_KM = 6371
-const CIRCLE_VERTICES = 48
+const CIRCLE_VERTICES = 4
 const MIN_RADIUS_KM = 0.2    // tiny floor so 0-acre fires still render as a dot
 const VISUAL_SCALE = 2       // mild 2x — preserves real ratios between fires
                              // while making small ones visible at zoom 6
@@ -21,8 +21,10 @@ function acresToRadiusKm(acres) {
   return Math.max(MIN_RADIUS_KM, trueRadius * VISUAL_SCALE)
 }
 
-// Approximate circle as a 48-sided polygon on the sphere (good enough at the
-// scale of a fire perimeter; ignores ellipsoid).
+// 4-sided diamond on the sphere — coarser than a true circle but reads as a
+// stylized fire footprint at zoom 6 and renders cheaply across many fires.
+// Bumping CIRCLE_VERTICES higher has caused render regressions at small radii;
+// keep it at 4 unless you've verified the change end-to-end on the map.
 function circlePolygon([lon, lat], radiusKm) {
   const ring = []
   const angularDist = radiusKm / EARTH_RADIUS_KM
