@@ -68,7 +68,8 @@ def _get_events():
     return _events_client
 
 FIRES_TABLE = os.environ.get("WW_DYNAMODB_FIRES_TABLE", "fires")
-SAGEMAKER_ENDPOINT = os.environ.get("WW_SAGEMAKER_ENDPOINT", "wildfire-watch-dispatch")
+SAGEMAKER_SPREAD_ENDPOINT = os.environ.get("WW_SAGEMAKER_SPREAD_ENDPOINT", "wildfire-watch-spread")
+SAGEMAKER_AREA_ENDPOINT   = os.environ.get("WW_SAGEMAKER_AREA_ENDPOINT",   "wildfire-watch-area")
 CONFIDENCE_THRESHOLD = float(os.environ.get("WW_CONFIDENCE_THRESHOLD", "0.65"))
 
 # Dispatch trigger thresholds (from pipeline-agent.md)
@@ -95,6 +96,18 @@ _FIRE_STATIONS = [
     {"station_id": "LAC-009", "name": "Station 9 — Big Bear", "lat": 34.2439, "lon": -116.9114},
     {"station_id": "LAC-010", "name": "Station 10 — Inland Empire", "lat": 34.0555, "lon": -117.1825},
 ]
+
+
+def _estimate_slope(lat: float, lon: float) -> float:
+    """Rough terrain slope estimate from SoCal region (DEM lookup in v2)."""
+    if lat > 34.3:
+        return 25.0   # San Gabriel / San Bernardino mountains
+    elif lon < -118.5:
+        return 8.0    # coastal (Malibu, Ventura) — gentle
+    elif lon > -117.2:
+        return 5.0    # desert edge — flat
+    else:
+        return 15.0   # inland foothills / canyons
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -199,9 +212,11 @@ def get_watershed_sites_at_risk(lat: float, lon: float, radius_km: float = 50.0)
 # ------------------------------------------------------------------
 
 def get_dispatch_recommendation(fire_event: dict) -> dict:
-    """Call the SageMaker endpoint and return dispatch recommendation + confidence.
+    """Call the two SageMaker regression endpoints and return spread predictions + dispatch.
 
-    Feature order must match FEATURE_NAMES in ml/dispatch_model/features.py.
+    Feature order: lat, lon, wind_speed_ms, wind_direction_deg, radiative_power,
+                   containment_pct, fuel_moisture_pct, slope_deg, hour_of_day, is_weekend
+    Must match FEATURE_NAMES in ml/dispatch_model/features.py.
     """
     detected_at = fire_event.get("detected_at", "")
     try:
@@ -211,28 +226,64 @@ def get_dispatch_recommendation(fire_event: dict) -> dict:
     except (ValueError, AttributeError):
         hour, is_weekend = 12, 0
 
-    stations = fire_event.get("nearest_stations", [])
-    nearest_dist = stations[0]["distance_km"] if stations else 50.0
-
     features = [
         float(fire_event.get("lat", 0)),
         float(fire_event.get("lon", 0)),
-        float(fire_event.get("spread_rate_km2_per_hr", 0)),
-        float(fire_event.get("population_at_risk", 0)),
-        float(nearest_dist),
         float(fire_event.get("wind_speed_ms", 0)),
+        float(fire_event.get("wind_direction_deg", 0)),
         float(fire_event.get("radiative_power", 0)),
+        float(fire_event.get("containment_pct", 0)),
+        float(fire_event.get("fuel_moisture_pct", 8.0)),   # default to fire-weather conditions
+        float(fire_event.get("slope_deg", 10.0)),
         float(hour),
         float(is_weekend),
     ]
 
-    resp = _get_sm().invoke_endpoint(
-        EndpointName=SAGEMAKER_ENDPOINT,
-        ContentType="application/json",
-        Accept="application/json",
-        Body=json.dumps({"features": features}),
+    csv_body = ",".join(str(f) for f in features)
+    sm = _get_sm()
+
+    spread_resp = sm.invoke_endpoint(
+        EndpointName=SAGEMAKER_SPREAD_ENDPOINT,
+        ContentType="text/csv", Accept="text/csv", Body=csv_body,
     )
-    return json.loads(resp["Body"].read())
+    spread_rate = max(0.0, float(spread_resp["Body"].read().decode().strip()))
+
+    area_resp = sm.invoke_endpoint(
+        EndpointName=SAGEMAKER_AREA_ENDPOINT,
+        ContentType="text/csv", Accept="text/csv", Body=csv_body,
+    )
+    projected_area_30min = max(0.0, float(area_resp["Body"].read().decode().strip()))
+
+    # Dispatch thresholds (km/hr linear spread rate) — rule-based for auditability
+    if spread_rate >= 1.5:
+        recommendation, dispatch_level = "AERIAL", 2
+    elif spread_rate >= 0.5:
+        recommendation, dispatch_level = "MUTUAL_AID", 1
+    else:
+        recommendation, dispatch_level = "LOCAL", 0
+
+    # Confidence: low near decision boundaries (0.5 and 1.5 km/hr).
+    # Normalise by 2.0 so 2 km/hr from any boundary = max confidence.
+    min_dist = min(abs(spread_rate - 0.5), abs(spread_rate - 1.5))
+    confidence = round(min(min_dist / 2.0, 1.0) * 0.7 + min(projected_area_30min / 2.0, 1.0) * 0.3, 3)
+
+    # Time-horizon area projections for UI time slider
+    import math as _math
+    current_area = float(fire_event.get("current_area_km2", 0.01))
+    r0 = _math.sqrt(max(current_area, 0.001) / _math.pi)
+    projections = {
+        label: round(_math.pi * (r0 + spread_rate * t) ** 2, 4)
+        for label, t in [("30min", 0.5), ("1hr", 1), ("3hr", 3), ("6hr", 6), ("12hr", 12), ("24hr", 24)]
+    }
+
+    return {
+        "spread_rate_km_hr":       round(spread_rate, 3),
+        "projected_area_30min_km2": round(projected_area_30min, 3),
+        "spread_projections":       projections,
+        "recommendation":           recommendation,
+        "dispatch_level":           dispatch_level,
+        "confidence":               confidence,
+    }
 
 
 # ------------------------------------------------------------------
@@ -247,13 +298,13 @@ def compute_risk_score(fire_event: dict) -> float:
     not used here — risk_score is an independent signal for the EventBridge
     dispatch trigger, while confidence gates human review.
     """
-    spread = float(fire_event.get("spread_rate_km2_per_hr", 0))
+    spread = float(fire_event.get("dispatch_recommendation", {}).get("spread_rate_km_hr", 0))
     population = float(fire_event.get("population_at_risk", 0))
     wind = float(fire_event.get("wind_speed_ms", 0))
     radiative = float(fire_event.get("radiative_power", 0))
     containment = float(fire_event.get("containment_pct", 0))
 
-    spread_score = min(spread / 5.0, 1.0)              # normalise to 5 km²/hr max
+    spread_score = min(spread / 8.0, 1.0)              # normalise to 8 km/hr (Santa Ana max)
     pop_score = min(population / 2000.0, 1.0)          # normalise to 2k people
     wind_score = min(wind / 15.0, 1.0)                 # normalise to 15 m/s
     radiative_score = min(radiative / 1000.0, 1.0)     # normalise to 1000 MW
@@ -295,9 +346,10 @@ def write_enriched_fire(enriched: dict) -> None:
 
     enriched_fields = [
         "risk_score", "wind_speed_ms", "wind_direction_deg",
+        "fuel_moisture_pct", "slope_deg",
         "population_at_risk", "watershed_sites_at_risk",
         "nearest_stations", "dispatch_recommendation",
-        "enriched_at",
+        "spread_rate_km_hr", "spread_rate_km2_per_hr", "spread_projections", "enriched_at",
     ]
     for field in enriched_fields:
         if field in enriched:
@@ -351,10 +403,19 @@ def enrich_fire(fire: dict) -> dict:
         wind = get_weather(lat, lon)
         fire["wind_speed_ms"] = wind.get("wind_speed_ms", 0.0)
         fire["wind_direction_deg"] = wind.get("wind_direction_deg", 0.0)
+        # Estimate dead fine fuel moisture from temperature (Rothermel feature).
+        # Higher temps → drier fuel. Calibrated to SoCal fire-weather observations:
+        # 100°F → ~8%, 80°F → ~14%, 110°F → ~5%.
+        temp_f = float(wind.get("temperature_f") or 85.0)
+        fire.setdefault("fuel_moisture_pct", max(3.0, 20.0 - (temp_f - 60.0) * 0.3))
     except Exception as e:
         logger.warning(f"fire_id={fire.get('fire_id')} NOAA lookup failed: {e}")
         fire.setdefault("wind_speed_ms", 0.0)
         fire.setdefault("wind_direction_deg", 0.0)
+        fire.setdefault("fuel_moisture_pct", 8.0)
+
+    # Estimate terrain slope from lat/lon region (SoCal proxy; DEM lookup in v2).
+    fire.setdefault("slope_deg", _estimate_slope(lat, lon))
 
     # 2. Nearest fire stations — needed as SageMaker feature.
     fire["nearest_stations"] = get_nearest_stations(lat, lon)
@@ -366,7 +427,17 @@ def enrich_fire(fire: dict) -> dict:
     fire["watershed_sites_at_risk"] = get_watershed_sites_at_risk(lat, lon)
 
     # 5. SageMaker dispatch recommendation — requires all features above.
-    fire["dispatch_recommendation"] = get_dispatch_recommendation(fire)
+    rec = get_dispatch_recommendation(fire)
+    fire["dispatch_recommendation"] = rec
+    fire["spread_rate_km_hr"]        = rec["spread_rate_km_hr"]
+    fire["spread_projections"]       = rec["spread_projections"]
+    # Backward-compat alias: area growth rate (km²/hr) for existing consumers
+    # (FireMap, DispatchPanel, dispatcher_notify, dispatch handler, advisory_prompt).
+    # Derived as (projected_area_30min - initial_area) / 0.5 hr.
+    initial_area = float(fire.get("current_area_km2", 0.01))
+    fire["spread_rate_km2_per_hr"] = round(
+        max(0.0, rec["projected_area_30min_km2"] - initial_area) / 0.5, 4
+    )
 
     # 6. Risk score — computed locally, used by EventBridge dispatch trigger.
     fire["risk_score"] = compute_risk_score(fire)
