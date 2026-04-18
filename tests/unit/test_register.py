@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 TABLE_NAME = "residents-test"
@@ -191,3 +192,149 @@ def test_register_overwrites_existing_resident(residents_table, register):
     item = residents_table.get_item(Key={"resident_id": "user-abc-123"})["Item"]
     assert item["phone"] == "+15555550200"
     assert item["lat"] == Decimal("40.0")
+
+
+# ---------------------------------------------------------------------------
+# Defensive parsing: malformed inputs that previously crashed the handler.
+# ---------------------------------------------------------------------------
+
+
+def test_register_rejects_non_dict_json_body(residents_table, register):
+    # Valid JSON but not an object - null, arrays, scalars used to crash with
+    # AttributeError because the handler called .get() on them.
+    for raw in ("null", "[1,2,3]", "42", '"hello"'):
+        event = _event(raw)
+        resp = register.handler(event)
+        assert resp["statusCode"] == 400, f"should reject body={raw!r}"
+        assert "JSON object" in json.loads(resp["body"])["error"]
+
+
+def test_register_rejects_empty_address(residents_table, register, monkeypatch):
+    # Previously fell through to Location Service which raised an uncaught
+    # ClientError. Now caught locally before any AWS call.
+    monkeypatch.setenv("WW_LOCATION_PLACE_INDEX", "test-index")
+    fake_location = MagicMock()
+    with patch.object(register, "_location", return_value=fake_location):
+        for empty in ("", "   ", "\t\n"):
+            event = _event({"phone": "+15555550100", "address": empty})
+            resp = register.handler(event)
+            assert resp["statusCode"] == 400, f"should reject address={empty!r}"
+            assert "non-empty" in json.loads(resp["body"])["error"]
+    fake_location.search_place_index_for_text.assert_not_called()
+
+
+def test_register_rejects_non_string_address(residents_table, register, monkeypatch):
+    monkeypatch.setenv("WW_LOCATION_PLACE_INDEX", "test-index")
+    fake_location = MagicMock()
+    with patch.object(register, "_location", return_value=fake_location):
+        event = _event({"phone": "+15555550100", "address": {"street": "Main"}})
+        resp = register.handler(event)
+    assert resp["statusCode"] == 400
+    fake_location.search_place_index_for_text.assert_not_called()
+
+
+def test_register_geocoder_client_error_returns_502(residents_table, register, monkeypatch):
+    # AWS Location Service throwing a ClientError (throttling, missing index,
+    # transient outage) must not crash the handler.
+    monkeypatch.setenv("WW_LOCATION_PLACE_INDEX", "test-index")
+    fake_location = MagicMock()
+    fake_location.search_place_index_for_text.side_effect = ClientError(
+        {"Error": {"Code": "ThrottlingException", "Message": "rate exceeded"}},
+        "SearchPlaceIndexForText",
+    )
+    with patch.object(register, "_location", return_value=fake_location):
+        event = _event({"phone": "+15555550100", "address": "1 Market St"})
+        resp = register.handler(event)
+    assert resp["statusCode"] == 502
+    body = json.loads(resp["body"])
+    # Must NOT leak the AWS error code or message
+    assert "ThrottlingException" not in body["error"]
+    assert "rate exceeded" not in body["error"]
+    assert "geocoding" in body["error"]
+
+
+def test_register_handles_missing_request_context(residents_table, register):
+    # Defensive: a Lambda invocation with no requestContext (e.g. invoked
+    # directly outside API Gateway) should reject cleanly rather than 500.
+    resp = register.handler({"body": json.dumps({"phone": "+15555550100", "lat": 0, "lon": 0})})
+    assert resp["statusCode"] == 401
+
+
+# ---------------------------------------------------------------------------
+# Boundary cases - the most likely places off-by-one bugs hide.
+# ---------------------------------------------------------------------------
+
+
+def test_register_accepts_lat_lon_at_exact_boundaries(residents_table, register):
+    # ±90 lat and ±180 lon are valid coordinates (poles, antimeridian).
+    for lat, lon in [(90, 0), (-90, 0), (0, 180), (0, -180), (90, 180), (-90, -180)]:
+        event = _event({"phone": "+15555550100", "lat": lat, "lon": lon})
+        resp = register.handler(event)
+        assert resp["statusCode"] == 201, f"should accept lat={lat}, lon={lon}"
+
+
+def test_register_rejects_just_outside_lat_lon_boundaries(residents_table, register):
+    for lat, lon, who in [(90.0001, 0, "lat"), (-90.0001, 0, "lat"),
+                          (0, 180.0001, "lon"), (0, -180.0001, "lon")]:
+        event = _event({"phone": "+15555550100", "lat": lat, "lon": lon})
+        resp = register.handler(event)
+        assert resp["statusCode"] == 400, f"should reject lat={lat}, lon={lon}"
+        assert who in json.loads(resp["body"])["error"]
+
+
+def test_register_radius_boundaries(residents_table, register):
+    # 0 rejected (must be > 0); 100 accepted (must be <= 100).
+    for radius, expected in [(0, 400), (0.0001, 201), (100, 201), (100.0001, 400)]:
+        event = _event(
+            {"phone": "+15555550100", "lat": 37.7, "lon": -122.4, "alert_radius_km": radius}
+        )
+        resp = register.handler(event)
+        assert resp["statusCode"] == expected, f"radius={radius} expected {expected}"
+
+
+def test_register_rejects_non_numeric_lat_lon(residents_table, register):
+    # Strings, booleans, dicts as lat/lon should 400, not crash.
+    for lat, lon in [("not-a-number", 0), (0, "nope"), ([1, 2], 0)]:
+        event = _event({"phone": "+15555550100", "lat": lat, "lon": lon})
+        resp = register.handler(event)
+        assert resp["statusCode"] == 400, f"should reject lat={lat!r}, lon={lon!r}"
+
+
+def test_register_rejects_non_numeric_radius(residents_table, register):
+    event = _event(
+        {"phone": "+15555550100", "lat": 37.7, "lon": -122.4, "alert_radius_km": "ten"}
+    )
+    resp = register.handler(event)
+    assert resp["statusCode"] == 400
+    assert "numeric" in json.loads(resp["body"])["error"]
+
+
+def test_register_extra_fields_ignored(residents_table, register):
+    # Forward-compatibility: unknown fields should be silently ignored, not
+    # cause the request to fail. Lets the frontend send extras during dev.
+    event = _event({
+        "phone": "+15555550100",
+        "lat": 37.7,
+        "lon": -122.4,
+        "favorite_color": "blue",
+        "nested": {"x": 1},
+    })
+    resp = register.handler(event)
+    assert resp["statusCode"] == 201
+    item = residents_table.get_item(Key={"resident_id": "user-abc-123"})["Item"]
+    assert "favorite_color" not in item
+    assert "nested" not in item
+
+
+def test_register_does_not_log_phone_on_address_path(residents_table, register, capsys, monkeypatch):
+    # The PII-no-log contract holds even on error paths in the address branch.
+    monkeypatch.setenv("WW_LOCATION_PLACE_INDEX", "test-index")
+    phone = "+15555550199"
+    fake_location = MagicMock()
+    fake_location.search_place_index_for_text.return_value = {"Results": []}
+    with patch.object(register, "_location", return_value=fake_location):
+        event = _event({"phone": phone, "address": "nowhere"})
+        register.handler(event)
+    captured = capsys.readouterr()
+    assert phone not in captured.out
+    assert phone not in captured.err

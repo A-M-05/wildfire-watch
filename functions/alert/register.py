@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 import boto3
+from botocore.exceptions import ClientError
 
 E164_RE = re.compile(r"^\+[1-9]\d{1,14}$")
 DEFAULT_ALERT_RADIUS_KM = Decimal("10")
@@ -74,17 +75,30 @@ def _to_decimal(value) -> Decimal:
     return Decimal(str(value))
 
 
+class GeocodeError(Exception):
+    """Raised by _geocode for any failure. Carries an HTTP status hint."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
 def _geocode(address: str) -> tuple[Decimal, Decimal]:
     """Geocode an address via AWS Location Service. Returns (lat, lon)."""
     index = os.environ.get("WW_LOCATION_PLACE_INDEX")
     if not index:
-        raise ValueError("server-side geocoding unavailable (WW_LOCATION_PLACE_INDEX unset)")
-    resp = _location().search_place_index_for_text(
-        IndexName=index, Text=address, MaxResults=1
-    )
+        raise GeocodeError("server-side geocoding unavailable (WW_LOCATION_PLACE_INDEX unset)")
+    try:
+        resp = _location().search_place_index_for_text(
+            IndexName=index, Text=address, MaxResults=1
+        )
+    except ClientError:
+        # Don't leak AWS error details to the API response. CloudWatch will
+        # have the full ClientError trace from boto3 for debugging.
+        raise GeocodeError("geocoding service unavailable", status=502)
     results = resp.get("Results", [])
     if not results:
-        raise ValueError("no geocoding match for address")
+        raise GeocodeError("no geocoding match for address")
     # Location Service returns Point as [longitude, latitude] (GeoJSON order).
     lon, lat = results[0]["Place"]["Geometry"]["Point"]
     return _to_decimal(lat), _to_decimal(lon)
@@ -93,10 +107,13 @@ def _geocode(address: str) -> tuple[Decimal, Decimal]:
 def _resolve_location(body: dict) -> tuple[Decimal, Decimal] | dict:
     """Return (lat, lon) on success, or an error response dict on failure."""
     if "address" in body:
+        address = body["address"]
+        if not isinstance(address, str) or not address.strip():
+            return _response(400, {"error": "address must be a non-empty string"})
         try:
-            return _geocode(body["address"])
-        except ValueError as e:
-            return _response(400, {"error": str(e)})
+            return _geocode(address)
+        except GeocodeError as e:
+            return _response(e.status, {"error": str(e)})
 
     if "lat" in body and "lon" in body:
         try:
@@ -116,6 +133,8 @@ def handler(event, context=None):
         body = json.loads(event.get("body") or "{}")
     except json.JSONDecodeError:
         return _response(400, {"error": "invalid JSON body"})
+    if not isinstance(body, dict):
+        return _response(400, {"error": "body must be a JSON object"})
 
     phone = body.get("phone")
     if not phone or not isinstance(phone, str) or not E164_RE.match(phone):
