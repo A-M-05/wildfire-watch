@@ -117,9 +117,10 @@ Format: `#N [label] Title | Depends on: X | Blocks: Y`
                Depends on: #4, #5
                Blocks: #22 (needs registered users to alert), #29
 
-#24 [alert]    Watershed contamination alert — USGS feed → Comprehend → advisory
+#24 [alert]    Watershed/reservoir water-level evacuation alert — USGS levels+flow → threatened-area advisory
                Depends on: #4, #21
                Blocks: nothing
+               Note: contamination-risk variant (EPA TRI + Comprehend) is backlogged
 ```
 
 ## Frontend (25–30)
