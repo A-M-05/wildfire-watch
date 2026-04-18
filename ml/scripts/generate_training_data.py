@@ -46,10 +46,7 @@ def _rothermel_spread(wind_speed_ms, fuel_moisture_pct, slope_deg, lat, lon, rng
     Wind converts from m/s at 6m height → midflame mph (×0.4 × 2.237).
     Slope factor uses Rothermel φ_s with β=0.05 (chaparral packing ratio).
     """
-    from ml.dispatch_model.spread_projection import (
-        rothermel_spread_rate, _infer_fuel_model, FUEL_MODELS
-    )
-    import math
+    from ml.dispatch_model.spread_projection import rothermel_spread_rate
 
     ros = rothermel_spread_rate(wind_speed_ms, fuel_moisture_pct, slope_deg, lat, lon)
 
