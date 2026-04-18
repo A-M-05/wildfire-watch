@@ -11,9 +11,9 @@
 const ACRES_TO_KM2 = 0.00404686
 const EARTH_RADIUS_KM = 6371
 const CIRCLE_VERTICES = 4
-const MIN_RADIUS_KM = 3      // floor so small fires are visible at statewide zoom
-const VISUAL_SCALE = 4       // exaggerate footprint for demo legibility — a real
-                             // 100-acre fire is ~300m across, invisible at zoom 6
+const MIN_RADIUS_KM = 0.2    // tiny floor so 0-acre fires still render as a dot
+const VISUAL_SCALE = 2       // mild 2x — preserves real ratios between fires
+                             // while making small ones visible at zoom 6
 
 function acresToRadiusKm(acres) {
   const km2 = Math.max(0, acres) * ACRES_TO_KM2
@@ -50,13 +50,42 @@ const CALFIRE_URL = '/api/calfire'   // proxied in vite.config.js to bypass CORS
 
 const USE_MOCK = import.meta.env.VITE_USE_MOCK_FIRES === 'true'
 
+// Stub county → primary evacuation route map. #9's enrichment Lambda + Location
+// Service routing will replace this with real route geometry.
+const EVAC_ROUTES = {
+  'Los Angeles': 'I-5 N → SR-14',
+  'Orange': 'I-5 S → SR-55',
+  'Riverside': 'I-15 N → SR-91',
+  'San Bernardino': 'I-15 S → I-10 W',
+  'San Diego': 'I-8 W → I-5 N',
+  'Ventura': 'US-101 N',
+  'Kern': 'SR-58 W → I-5',
+  'Fresno': 'SR-99 N',
+  'Santa Barbara': 'US-101 S',
+  'Tulare': 'SR-65 → SR-99',
+}
+
+// Population-at-risk stub — proportional to acres with a 250-person floor so
+// even small fires register as a non-zero alert. Real numbers come from #9's
+// US Census enrichment by alert-radius polygon.
+function estimatePopulationAtRisk(acres) {
+  return Math.max(250, Math.round((acres || 0) * 8))
+}
+
+// Alert radius scales sub-linearly with acreage so small and large incidents
+// stay distinguishable: a 200-acre brushfire gets ~5 km, a 75 k-acre megafire
+// gets ~45 km. 3 km floor keeps any active fire visible as an alert zone.
+function alertRadiusKm(acres) {
+  return 3 + Math.sqrt(Math.max(0, acres)) * 0.15
+}
+
 function normalizeCalFireFeature(f) {
   const p = f.properties || {}
   const acres = p.AcresBurned ?? 0
-  const geometry =
-    f.geometry?.type === 'Point'
-      ? circlePolygon(f.geometry.coordinates, acresToRadiusKm(acres))
-      : f.geometry
+  const point = f.geometry?.type === 'Point' ? f.geometry.coordinates : null
+  const geometry = point
+    ? circlePolygon(point, acresToRadiusKm(acres))
+    : f.geometry
   return {
     type: 'Feature',
     geometry,
@@ -64,13 +93,84 @@ function normalizeCalFireFeature(f) {
       fire_id: p.UniqueId,
       name: (p.Name || '').trim(),
       containment_pct: p.PercentContained ?? 0,
-      acres_burned: p.AcresBurned ?? 0,
+      acres_burned: acres,
       county: p.County,
       location: p.Location,
       detected_at: p.Started,
       last_updated: p.Updated,
       url: p.Url,
+      // Populated client-side as a stand-in for #9 enrichment + Location Service.
+      alert_radius_km: alertRadiusKm(acres),
+      population_at_risk: estimatePopulationAtRisk(acres),
+      evacuation_route: EVAC_ROUTES[p.County] || 'Check local CAL FIRE advisory',
+      // Centroid used to draw the alert-zone polygon (see buildAlertZones).
+      centroid: point,
       // spread_rate isn't in the CAL FIRE feed — leave undefined; popup tolerates it
+    },
+  }
+}
+
+// Polygon centroid via average of ring vertices (close enough for our convex
+// synth circles and the small mock diamonds; not a true area-weighted centroid).
+function polygonCentroid(geometry) {
+  const ring = geometry?.coordinates?.[0]
+  if (!ring?.length) return null
+  let sx = 0, sy = 0
+  // Last vertex of a closed ring duplicates the first — skip it.
+  const n = ring.length - 1
+  for (let i = 0; i < n; i++) {
+    sx += ring[i][0]
+    sy += ring[i][1]
+  }
+  return [sx / n, sy / n]
+}
+
+// Derives a FeatureCollection of alert-zone circles from the fire features.
+// Kept as a separate source so the zone fill can sit under the fire footprint
+// without confusing layer stacking or hover targets.
+export function buildAlertZones(fireCollection) {
+  const features = (fireCollection?.features || [])
+    .map((f) => {
+      const p = f.properties || {}
+      const center = p.centroid || polygonCentroid(f.geometry)
+      if (!center) return null
+      const radius = p.alert_radius_km || alertRadiusKm(p.acres_burned)
+      return {
+        type: 'Feature',
+        geometry: circlePolygon(center, radius),
+        properties: {
+          fire_id: p.fire_id,
+          name: p.name,
+          population_at_risk: p.population_at_risk ?? estimatePopulationAtRisk(p.acres_burned),
+          evacuation_route: p.evacuation_route || EVAC_ROUTES[p.county] || 'Check local CAL FIRE advisory',
+          alert_radius_km: radius,
+        },
+      }
+    })
+    .filter(Boolean)
+  return { type: 'FeatureCollection', features }
+}
+
+// Mock fires are stored in our normalized schema as Points + acres_burned, then
+// run through the same synthesis pipeline as live (so alert radius, centroid,
+// stubs, and footprint all derive from the same code path).
+function normalizeMockFeature(f) {
+  const p = f.properties || {}
+  const point = f.geometry?.type === 'Point' ? f.geometry.coordinates : null
+  const acres = p.acres_burned ?? 0
+  const geometry = point
+    ? circlePolygon(point, acresToRadiusKm(acres))
+    : f.geometry
+  return {
+    type: 'Feature',
+    geometry,
+    properties: {
+      ...p,
+      acres_burned: acres,
+      alert_radius_km: alertRadiusKm(acres),
+      population_at_risk: p.population_at_risk ?? estimatePopulationAtRisk(acres),
+      evacuation_route: p.evacuation_route || EVAC_ROUTES[p.county] || 'Check local CAL FIRE advisory',
+      centroid: point || polygonCentroid(f.geometry),
     },
   }
 }
@@ -78,7 +178,11 @@ function normalizeCalFireFeature(f) {
 async function fetchMock() {
   const res = await fetch(MOCK_URL, { cache: 'no-store' })
   if (!res.ok) throw new Error(`failed to fetch mock fires (${res.status})`)
-  return res.json()
+  const raw = await res.json()
+  return {
+    type: 'FeatureCollection',
+    features: (raw.features || []).map(normalizeMockFeature),
+  }
 }
 
 async function fetchLive() {

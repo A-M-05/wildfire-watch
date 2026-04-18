@@ -1,7 +1,8 @@
 import mapboxgl from 'mapbox-gl'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import { useEffect, useRef, useState } from 'react'
-import { fetchActiveFires } from './api/fires'
+import { fetchActiveFires, buildAlertZones } from './api/fires'
+import { buildEvacRoutes, routeSummaryForFire } from './api/evacRoutes'
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN
 
@@ -30,9 +31,22 @@ export default function FireMap() {
   const mapRef = useRef(null)
   const stationsRef = useRef(null)
   const firesRef = useRef(null)
+  const zonesRef = useRef(null)
+  const routesRef = useRef(null)
+  const destsRef = useRef(null)
   const didInitTheme = useRef(false)
   const [error, setError] = useState(null)
   const [theme, setTheme] = useState('light')
+  // Click a fire to toggle its evac route. Single-select keeps the map readable
+  // (a dozen overlapping routes turns into spaghetti). null = no route shown.
+  const [selectedFireId, setSelectedFireId] = useState(null)
+  const selectedFireIdRef = useRef(null)
+  selectedFireIdRef.current = selectedFireId
+
+  // Mapbox filter expression that matches a single fire_id (or matches nothing
+  // when null is passed). Used to scope evac route + destination visibility.
+  const filterForSelected = (id) =>
+    id ? ['==', ['get', 'fire_id'], id] : ['==', ['get', 'fire_id'], '__none__']
 
   // Adds the stations source + circle layer. Called on first load and after
   // every setStyle() — changing the basemap wipes user-added sources/layers.
@@ -92,15 +106,151 @@ export default function FireMap() {
     }, 'fire-stations-circle')
   }
 
+  // Alert-zone fill + dashed outline drawn UNDER the fire footprint so the
+  // smaller burned area stays readable on top. Stable amber so it reads as
+  // "warning halo" regardless of containment color.
+  const addAlertZonesLayer = (map, data) => {
+    for (const id of ['alert-zones-fill', 'alert-zones-outline']) {
+      if (map.getLayer(id)) map.removeLayer(id)
+    }
+    if (map.getSource('alert-zones')) map.removeSource('alert-zones')
+
+    map.addSource('alert-zones', { type: 'geojson', data })
+    // Insert beneath fires-fill so the burned footprint sits visibly on top.
+    const beforeId = map.getLayer('fires-fill') ? 'fires-fill' : 'fire-stations-circle'
+    map.addLayer({
+      id: 'alert-zones-fill',
+      type: 'fill',
+      source: 'alert-zones',
+      paint: { 'fill-color': '#ffaa00', 'fill-opacity': 0.12 },
+    }, beforeId)
+    map.addLayer({
+      id: 'alert-zones-outline',
+      type: 'line',
+      source: 'alert-zones',
+      paint: {
+        'line-color': '#ff7700',
+        'line-width': 1.5,
+        'line-opacity': 0.7,
+        'line-dasharray': [2, 2],
+      },
+    }, beforeId)
+  }
+
+  // Evac route polylines drawn ABOVE the alert-zone halo so the corridor reads
+  // clearly, but BELOW stations so trucks stay clickable. Two stacked line
+  // layers (dark casing + bright fill) give a road-style appearance that
+  // contrasts against both light and dark basemaps.
+  const addEvacLayers = (map, routes, destinations) => {
+    for (const id of ['evac-route-casing', 'evac-route-line', 'evac-dest-circle', 'evac-dest-label']) {
+      if (map.getLayer(id)) map.removeLayer(id)
+    }
+    for (const id of ['evac-routes', 'evac-destinations']) {
+      if (map.getSource(id)) map.removeSource(id)
+    }
+
+    map.addSource('evac-routes', { type: 'geojson', data: routes })
+    map.addSource('evac-destinations', { type: 'geojson', data: destinations })
+
+    const beforeId = map.getLayer('fire-stations-circle') ? 'fire-stations-circle' : undefined
+    // All four evac layers honor the same per-fire filter so showing or hiding
+    // a route is a single-state toggle, not four parallel updates.
+    const filter = filterForSelected(selectedFireIdRef.current)
+    map.addLayer({
+      id: 'evac-route-casing',
+      type: 'line',
+      source: 'evac-routes',
+      filter,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#0a3d62', 'line-width': 6, 'line-opacity': 0.9 },
+    }, beforeId)
+    // Line color reflects worst-case traffic on the route. Cyan = clear,
+    // amber/red telegraph "this evac corridor is already congested."
+    map.addLayer({
+      id: 'evac-route-line',
+      type: 'line',
+      source: 'evac-routes',
+      filter,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-width': 3,
+        'line-opacity': 0.95,
+        'line-color': [
+          'match', ['get', 'traffic_severity'],
+          'severe', '#ff2200',
+          'heavy', '#ff8800',
+          'moderate', '#ffdd33',
+          /* low / unknown */ '#00d2ff',
+        ],
+      },
+    }, beforeId)
+    map.addLayer({
+      id: 'evac-dest-circle',
+      type: 'circle',
+      source: 'evac-destinations',
+      filter,
+      paint: {
+        'circle-radius': 8,
+        'circle-color': '#22cc44',
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': 2,
+      },
+    }, beforeId)
+    map.addLayer({
+      id: 'evac-dest-label',
+      type: 'symbol',
+      source: 'evac-destinations',
+      filter,
+      layout: {
+        'text-field': ['get', 'name'],
+        'text-size': 12,
+        'text-offset': [0, 1.4],
+        'text-anchor': 'top',
+        'text-allow-overlap': false,
+      },
+      paint: {
+        'text-color': '#0a3d62',
+        'text-halo-color': '#ffffff',
+        'text-halo-width': 2,
+      },
+    })
+  }
+
   const refreshFires = async (map) => {
     try {
-      const data = await fetchActiveFires()
-      firesRef.current = data
+      const fires = await fetchActiveFires()
+      const zones = buildAlertZones(fires)
+      firesRef.current = fires
+      zonesRef.current = zones
       if (map.isStyleLoaded()) {
-        const src = map.getSource('active-fires')
-        if (src) src.setData(data)
-        else addFiresLayer(map, data)
+        const fireSrc = map.getSource('active-fires')
+        if (fireSrc) fireSrc.setData(fires)
+        else addFiresLayer(map, fires)
+        const zoneSrc = map.getSource('alert-zones')
+        if (zoneSrc) zoneSrc.setData(zones)
+        else addAlertZonesLayer(map, zones)
       }
+
+      // Evac routes are async per fire and shouldn't block the fires render.
+      // Fire-and-forget; layer updates as soon as routes resolve.
+      buildEvacRoutes(fires).then(({ routes, destinations }) => {
+        routesRef.current = routes
+        destsRef.current = destinations
+        console.log(`[evac] ${routes.features.length}/${fires.features.length} routes resolved`)
+        const apply = () => {
+          const rSrc = map.getSource('evac-routes')
+          const dSrc = map.getSource('evac-destinations')
+          if (rSrc && dSrc) {
+            rSrc.setData(routes)
+            dSrc.setData(destinations)
+          } else {
+            addEvacLayers(map, routes, destinations)
+          }
+        }
+        // Style may still be settling on first load — defer until idle if so.
+        if (map.isStyleLoaded()) apply()
+        else map.once('idle', apply)
+      }).catch((e) => console.warn('evac routes failed:', e.message))
     } catch (e) {
       setError(`fire load failed: ${e.message}`)
     }
@@ -181,12 +331,76 @@ export default function FireMap() {
       map.on('mouseleave', layer, hideFirePopup)
     }
 
+    // Alert-zone popup — population at risk + nearest evac route. These are
+    // client-side stubs today (api/fires.js) and will be replaced by #9's
+    // enrichment + Location Service routing once that pipeline lands.
+    const zonePopup = new mapboxgl.Popup({ closeButton: false, offset: 8 })
+    map.on('mouseenter', 'alert-zones-fill', (e) => {
+      const fireHit = map.queryRenderedFeatures(e.point, { layers: ['fires-fill'] })
+      if (fireHit.length) return  // fire popup wins when hovering the burned area
+      map.getCanvas().style.cursor = 'pointer'
+      const p = e.features[0].properties
+      const route = routeSummaryForFire(p.fire_id)
+      const trafficLabel = {
+        severe: '🔴 severe traffic',
+        heavy: '🟠 heavy traffic',
+        moderate: '🟡 moderate traffic',
+        low: '🟢 clear',
+        unknown: 'traffic unknown',
+      }[route?.traffic_severity] || ''
+      const evacLine = route
+        ? `Evac route: <strong>${route.destination}</strong> — ` +
+          `${route.distance_km.toFixed(0)} km · ${Math.round(route.duration_min)} min<br/>` +
+          `<span style="color:#444;font-size:12px">${trafficLabel} (live)</span>`
+        : `Evac route: ${p.evacuation_route} (computing…)`
+      zonePopup
+        .setLngLat(e.lngLat)
+        .setHTML(
+          `<strong>Alert zone — ${p.name || 'fire'}</strong><br/>` +
+          `Radius: ${Number(p.alert_radius_km).toFixed(1)} km<br/>` +
+          `Population at risk: ~${Number(p.population_at_risk).toLocaleString()}<br/>` +
+          `${evacLine}<br/>` +
+          `<span style="color:#666;font-size:11px">Stub data — #9 enrichment pending</span>`
+        )
+        .addTo(map)
+    })
+    map.on('mouseleave', 'alert-zones-fill', () => {
+      map.getCanvas().style.cursor = ''
+      zonePopup.remove()
+    })
+
+    // Click a fire footprint to toggle its evac route. Click again on the same
+    // fire (or any empty space) to hide it. Single-fire selection only.
+    map.on('click', 'fires-fill', (e) => {
+      const id = e.features[0]?.properties?.fire_id
+      if (!id) return
+      e.originalEvent.__fireClick = true   // suppress the empty-space deselect below
+      setSelectedFireId((prev) => (prev === id ? null : id))
+    })
+    map.on('click', (e) => {
+      if (e.originalEvent.__fireClick) return
+      setSelectedFireId(null)
+    })
+
     return () => {
       clearInterval(interval)
       map.remove()
       mapRef.current = null
     }
   }, [])
+
+  // Push the per-fire selection into the four evac layer filters whenever the
+  // user clicks a different fire. Layers may not exist yet on first selection
+  // (routes haven't resolved) — addEvacLayers reads the same ref to apply the
+  // current filter at creation time.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    const filter = filterForSelected(selectedFireId)
+    for (const id of ['evac-route-casing', 'evac-route-line', 'evac-dest-circle', 'evac-dest-label']) {
+      if (map.getLayer(id)) map.setFilter(id, filter)
+    }
+  }, [selectedFireId])
 
   // Swap basemap on theme change; re-attach stations once the new style settles.
   // Skip the first run — the map constructor already loaded the initial theme.
@@ -202,6 +416,10 @@ export default function FireMap() {
     map.once('style.load', () => {
       if (stationsRef.current) addStationsLayer(map, stationsRef.current)
       if (firesRef.current) addFiresLayer(map, firesRef.current)
+      if (zonesRef.current) addAlertZonesLayer(map, zonesRef.current)
+      if (routesRef.current && destsRef.current) {
+        addEvacLayers(map, routesRef.current, destsRef.current)
+      }
     })
   }, [theme])
 
