@@ -1,16 +1,17 @@
 """
-Dispatcher notification Lambda — called by Step Functions when confidence < 0.65.
+Dispatcher notification Lambda — called by Step Functions when action=HUMAN_REVIEW_REQUIRED.
 
 Step Functions invokes this with WAIT_FOR_TASK_TOKEN integration, meaning:
   - The execution pauses after this Lambda returns
   - The Lambda must store or forward the task_token somewhere the dispatcher can use it
-  - The dispatcher resumes the execution by calling sfn:SendTaskSuccess(taskToken, output)
-    or sfn:SendTaskFailure(taskToken, error) — typically from a dashboard UI or Slack bot
-  - If nobody responds within the heartbeat window (5 min), Step Functions raises
-    States.HeartbeatTimeout and the catch handler routes to EscalateAndAlert
+  - The dispatcher resumes by calling sfn:SendTaskSuccess(taskToken, output) to APPROVE,
+    or sfn:SendTaskFailure(taskToken, error) to REJECT — typically from the dashboard UI (#28)
+  - If nobody responds within 5 minutes, Step Functions raises States.HeartbeatTimeout
+    and the catch handler routes to LogAndStop (fail closed — no alert without a human)
 
 This Lambda does two things:
-  1. Publishes an SNS alert to the dispatcher topic with fire details + task token
+  1. Publishes an SNS alert to the dispatcher topic with fire details + Guardrails-validated
+     advisory text + task token (so the dispatcher sees the exact SMS that would go out)
   2. Writes the pending review to DynamoDB so the dispatcher UI (#28) can list open reviews
 
 The task token is the resume key — treat it like a one-time password.
@@ -48,8 +49,14 @@ def _get_ddb():
     return _ddb
 
 
-def _format_dispatcher_alert(fire: dict, recommendation: dict, task_token: str) -> str:
-    """Build the SNS message body sent to the dispatcher for human review."""
+def _format_dispatcher_alert(
+    fire: dict, recommendation: dict, task_token: str, advisory: dict
+) -> str:
+    """Build the SNS message body sent to the dispatcher for human review.
+
+    Shows the Guardrails-validated advisory SMS text so the dispatcher sees
+    the exact message that will go to residents if they approve.
+    """
     fire_id = fire.get("fire_id", "unknown")
     confidence = recommendation.get("confidence", 0)
     rec = recommendation.get("recommendation", "unknown")
@@ -57,6 +64,9 @@ def _format_dispatcher_alert(fire: dict, recommendation: dict, task_token: str) 
     population = fire.get("population_at_risk", 0)
     lat = fire.get("lat", 0)
     lon = fire.get("lon", 0)
+    # advisory is {"sms": "...", "brief": "..."} from the safety gate Lambda (#21).
+    # Show the SMS text — that's exactly what residents will receive on APPROVE.
+    advisory_sms = advisory.get("sms", "(advisory text unavailable)")
 
     return (
         f"HUMAN REVIEW REQUIRED — Wildfire Dispatch\n"
@@ -66,17 +76,20 @@ def _format_dispatcher_alert(fire: dict, recommendation: dict, task_token: str) 
         f"Confidence: {confidence:.1%} (below {CONFIDENCE_THRESHOLD:.0%} threshold)\n"
         f"Spread rate: {spread:.1f} km²/hr | Population at risk: {population:,}\n"
         f"\n"
+        f"Advisory text (Guardrails-validated — sent to residents on APPROVE):\n"
+        f"  {advisory_sms}\n"
+        f"\n"
         f"To APPROVE this dispatch, call:\n"
         f"  aws stepfunctions send-task-success \\\n"
         f"    --task-token '{task_token}' \\\n"
         f"    --task-output '{{\"approved\": true}}'\n"
         f"\n"
-        f"To REJECT (stop dispatch), call:\n"
+        f"To REJECT (cancel dispatch), call:\n"
         f"  aws stepfunctions send-task-failure \\\n"
         f"    --task-token '{task_token}' \\\n"
         f"    --error 'HumanRejected' --cause 'Dispatcher rejected low-confidence dispatch'\n"
         f"\n"
-        f"This review will auto-escalate in 5 minutes if no response."
+        f"This review will close in 5 minutes if no response (no alert will be sent)."
     )
 
 
@@ -108,15 +121,18 @@ def handler(event, context):
     task_token = event.get("task_token")
     fire = event.get("fire_event", {})
     recommendation = event.get("recommendation", {})
+    # advisory is {"sms": str, "brief": str} from the safety gate Lambda (#21).
+    # It has already passed Guardrails validation — safe to surface to dispatchers.
+    advisory = event.get("advisory", {})
 
     fire_id = fire.get("fire_id", "unknown")
     confidence = recommendation.get("confidence", 0)
 
     logger.info(f"fire_id={fire_id} confidence={confidence:.3f} — dispatching for human review")
 
-    # 1. Publish SNS alert to dispatcher topic.
+    # 1. Publish SNS alert to dispatcher topic with the validated advisory text.
     if SNS_ALERT_TOPIC_ARN:
-        message = _format_dispatcher_alert(fire, recommendation, task_token)
+        message = _format_dispatcher_alert(fire, recommendation, task_token, advisory)
         _get_sns().publish(
             TopicArn=SNS_ALERT_TOPIC_ARN,
             Subject=f"[REVIEW REQUIRED] Wildfire dispatch — confidence {confidence:.0%}",

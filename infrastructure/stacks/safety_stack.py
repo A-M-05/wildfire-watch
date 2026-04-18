@@ -213,21 +213,22 @@ class SafetyStack(Stack):
 
         Flow (Guardrails run on ALL paths — CLAUDE.md safety rule #2):
           SafetyGate (LambdaInvoke — runs Bedrock advisory + Guardrails + audit write)
-            → ActionRouter (Choice on $.Payload.action)
+            → ActionRouter (Choice on $.safety_gate_result.Payload.action)
                  ├─ APPROVED               → AlertSender
                  ├─ HUMAN_REVIEW_REQUIRED  → NotifyDispatcherAndWait (WAIT_FOR_TASK_TOKEN, 5-min)
-                 │                              ├─ approved → AlertSender
-                 │                              └─ timeout  → EscalateAndAlert → AlertSender
-                 └─ BLOCKED                → LogAndStop  (no SMS — advisory was unsafe)
+                 │                              ├─ SendTaskSuccess (approved) → AlertSender
+                 │                              ├─ SendTaskFailure (rejected) → LogAndStop
+                 │                              └─ timeout (5 min, no response) → LogAndStop
+                 └─ BLOCKED / other        → LogAndStop  (no SMS — advisory was unsafe)
 
-        Guardrails run inside the safety gate Lambda (#21) before the action is
-        determined, so PII stripping and false-certainty blocking apply to every
-        advisory — including low-confidence ones headed for human review.
+        Fail-closed on timeout: CLAUDE.md rule #3 says Step Functions *pauses* for human
+        review on low confidence. A 5-minute timeout without a response means no human
+        approved the alert, so we stop rather than auto-dispatch.
         """
 
         # Safety gate Lambda (#21) — the single choke point for every advisory.
         # Returns: { "action": "APPROVED"|"HUMAN_REVIEW_REQUIRED"|"BLOCKED",
-        #            "prediction_id": str, "advisory": str, ... }
+        #            "prediction_id": str, "advisory": {"sms": str, "brief": str} }
         # Imported by name so this stack can deploy before #21 is merged to main.
         safety_gate_fn = lambda_.Function.from_function_name(
             self, "SafetyGateFn",
@@ -244,37 +245,26 @@ class SafetyStack(Stack):
             result_path="$.safety_gate_result",
         )
 
-        # Terminal states — alert sender is a placeholder until #22 is wired.
+        # Terminal state — alert sender placeholder until #22 is wired.
         alert_sender = sfn.Pass(
             self, "AlertSender",
             comment="Replaced by alert sender LambdaInvoke in #22",
         )
 
-        # Blocked — advisory failed Guardrails; no SMS, no human override allowed.
+        # Fail-closed terminal state: no SMS dispatched.
+        # Used for: BLOCKED (Guardrails), REJECT (dispatcher), timeout (no response).
         log_and_stop = sfn.Pass(
             self, "LogAndStop",
-            comment="Advisory blocked by Guardrails — no alert dispatched",
+            comment="No alert dispatched — blocked by Guardrails, rejected by dispatcher, or timed out",
             parameters={
-                "blocked": True,
-                "prediction_id.$": "$.safety_gate_result.Payload.prediction_id",
+                "stopped": True,
                 "fire_event.$": "$.fire_event",
             },
         )
 
-        # Auto-escalate when dispatcher doesn't respond within 5 minutes.
-        escalate_and_alert = sfn.Pass(
-            self, "EscalateAndAlert",
-            comment="Heartbeat timeout — auto-escalate: dispatch without human approval",
-            parameters={
-                "escalated": True,
-                "reason": "Dispatcher did not respond within 5 minutes — auto-escalated",
-                "fire_event.$": "$$.Execution.Input.fire_event",
-            },
-        ).next(alert_sender)
-
         # Human-in-the-loop gate — pauses until sfn:SendTaskSuccess/Failure.
-        # The dispatcher_notify Lambda sends the task token to the dispatcher via SNS
-        # and stores it in DynamoDB so the UI can resume without the CLI.
+        # The dispatcher_notify Lambda sends the task token + validated advisory to the
+        # dispatcher via SNS and stores it in DynamoDB so the UI can resume without CLI.
         notify_and_wait = tasks.LambdaInvoke(
             self, "NotifyDispatcherAndWait",
             lambda_function=self.dispatcher_notify_fn,
@@ -283,16 +273,25 @@ class SafetyStack(Stack):
                 "task_token": sfn.JsonPath.task_token,
                 "fire_event": sfn.JsonPath.string_at("$.fire_event"),
                 "recommendation": sfn.JsonPath.string_at("$.recommendation"),
-                # Pass the Guardrails-validated advisory so the dispatcher sees
-                # the same text that would be sent if they approve.
+                # Guardrails-validated advisory — dispatcher sees the exact SMS
+                # text that will go to residents if they approve.
                 "advisory": sfn.JsonPath.string_at("$.safety_gate_result.Payload.advisory"),
             }),
-            heartbeat=Duration.minutes(5),
+            # timeout (not heartbeat): we expect one response, not periodic heartbeats.
+            # After 5 minutes with no SendTaskSuccess/Failure, fail closed.
+            timeout=Duration.minutes(5),
             result_path="$.approval_result",
         )
+        # Dispatcher REJECT → log and stop (no alert).
         notify_and_wait.add_catch(
-            escalate_and_alert,
-            errors=["States.HeartbeatTimeout", "States.TaskFailed", "States.ALL"],
+            log_and_stop,
+            errors=["States.TaskFailed"],
+            result_path="$.error",
+        )
+        # Timeout with no response → also log and stop (fail closed per CLAUDE.md rule #3).
+        notify_and_wait.add_catch(
+            log_and_stop,
+            errors=["States.Timeout"],
             result_path="$.error",
         )
         notify_and_wait.next(alert_sender)
