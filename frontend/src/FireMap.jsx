@@ -3,6 +3,7 @@ import 'mapbox-gl/dist/mapbox-gl.css'
 import { useEffect, useRef, useState } from 'react'
 import { fetchActiveFires, buildAlertZones } from './api/fires'
 import { buildEvacRoutes, routeSummaryForFire } from './api/evacRoutes'
+import { useFireWebSocket } from './api/websocket'
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN
 
@@ -26,7 +27,7 @@ const STYLES = {
   dark: 'mapbox://styles/mapbox/dark-v11',
 }
 
-export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChange, onFiresLoaded }) {
+export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChange, onFiresLoaded, onAlertSent }) {
   const containerRef = useRef(null)
   const mapRef = useRef(null)
   const stationsRef = useRef(null)
@@ -264,6 +265,36 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       setError(`fire load failed: ${e.message}`)
     }
   }
+
+  // Live patch from a `fire_updated` WebSocket message — replace the matching
+  // feature in firesRef (or append if it's a brand-new fire), recompute alert
+  // zones from the patched collection, and push both back to Mapbox without a
+  // full reload. Falls through silently if the map isn't ready yet (the next
+  // 30s polling refresh will pick it up).
+  const patchFire = (feature) => {
+    const id = feature?.properties?.fire_id
+    const map = mapRef.current
+    if (!id || !map) return
+    const current = firesRef.current?.features || []
+    const idx = current.findIndex((f) => f.properties?.fire_id === id)
+    const nextFeatures = idx >= 0
+      ? current.map((f, i) => (i === idx ? feature : f))
+      : [...current, feature]
+    const fires = { type: 'FeatureCollection', features: nextFeatures }
+    const zones = buildAlertZones(fires)
+    firesRef.current = fires
+    zonesRef.current = zones
+    if (onFiresLoaded) onFiresLoaded(fires)
+    const fireSrc = map.getSource('active-fires')
+    const zoneSrc = map.getSource('alert-zones')
+    if (fireSrc) fireSrc.setData(fires)
+    if (zoneSrc) zoneSrc.setData(zones)
+  }
+
+  useFireWebSocket({
+    onFireUpdate: patchFire,
+    onAlertSent: (msg) => onAlertSent?.(msg),
+  })
 
   useEffect(() => {
     if (mapRef.current) return
