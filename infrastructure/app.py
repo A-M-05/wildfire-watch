@@ -2,6 +2,7 @@ import aws_cdk as cdk
 from stacks.core_stack import CoreStack
 from stacks.safety_stack import SafetyStack
 from stacks.messaging_stack import MessagingStack
+from stacks.frontend_stack import FrontendStack
 
 app = cdk.App()
 
@@ -23,6 +24,11 @@ SafetyStack(app, "WildfireWatchSafety",
 MessagingStack(app, "WildfireWatchMessaging",
     env=env,
     description="Wildfire Watch — SNS, Pinpoint, SES (issue #4)",
+)
+
+FrontendStack(app, "WildfireWatchFrontend",
+    env=env,
+    description="Wildfire Watch — Cognito, API Gateway, Amplify (issue #5)",
 )
 
 app.synth()
