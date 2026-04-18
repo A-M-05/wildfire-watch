@@ -2,12 +2,16 @@
 //
 // Two modes, controlled by VITE_USE_MOCK_FIRES:
 //   "true"  → static demo GeoJSON in /public (curated polygons for demo runs)
-//   "false" → live fetch from CAL FIRE's public incident API (current real fires)
+//   "false" → live fetch from the backend GET /fires endpoint, which returns
+//             enriched, normalized fire records straight from DynamoDB. Risk
+//             score, population at risk, alert radius, etc. all come from the
+//             enrichment Lambda (#9) — no client-side estimation anymore.
 //
-// CAL FIRE returns Point geometries with AcresBurned. We synthesize a circular
-// polygon sized to the burned area so fires scale visibly on the map — a real
-// perimeter would come from #7's enrichment, but acres+centroid is what the
-// public feed gives us today.
+// Records may carry a real perimeter polygon (`geometry.type === 'Polygon'`)
+// or just a centroid (`geometry.type === 'Point'`) when the upstream source
+// — typically CAL FIRE — only published acres + lat/lon. For the Point case
+// we synthesize a small footprint so the fire stays visible on the map.
+
 const ACRES_TO_KM2 = 0.00404686
 const EARTH_RADIUS_KM = 6371
 const CIRCLE_VERTICES = 4
@@ -48,52 +52,14 @@ function circlePolygon([lon, lat], radiusKm) {
 }
 
 const MOCK_URL = '/data/active_fires.geojson'
-const CALFIRE_URL = '/api/calfire'   // proxied in vite.config.js to bypass CORS
-
+const API_BASE = import.meta.env.VITE_API_URL || ''
 const USE_MOCK = import.meta.env.VITE_USE_MOCK_FIRES === 'true'
 
-// Population-at-risk stub — proportional to acres with a 250-person floor so
-// even small fires register as a non-zero alert. Real numbers come from #9's
-// US Census enrichment by alert-radius polygon.
-function estimatePopulationAtRisk(acres) {
-  return Math.max(250, Math.round((acres || 0) * 8))
-}
-
-// Alert radius scales sub-linearly with acreage so small and large incidents
-// stay distinguishable: a 200-acre brushfire gets ~5 km, a 75 k-acre megafire
-// gets ~45 km. 3 km floor keeps any active fire visible as an alert zone.
-function alertRadiusKm(acres) {
-  return 3 + Math.sqrt(Math.max(0, acres)) * 0.15
-}
-
-function normalizeCalFireFeature(f) {
-  const p = f.properties || {}
-  const acres = p.AcresBurned ?? 0
-  const point = f.geometry?.type === 'Point' ? f.geometry.coordinates : null
-  const geometry = point
-    ? circlePolygon(point, acresToRadiusKm(acres))
-    : f.geometry
-  return {
-    type: 'Feature',
-    geometry,
-    properties: {
-      fire_id: p.UniqueId,
-      name: (p.Name || '').trim(),
-      containment_pct: p.PercentContained ?? 0,
-      acres_burned: acres,
-      county: p.County,
-      location: p.Location,
-      detected_at: p.Started,
-      last_updated: p.Updated,
-      url: p.Url,
-      // Populated client-side as a stand-in for #9 enrichment + Location Service.
-      alert_radius_km: alertRadiusKm(acres),
-      population_at_risk: estimatePopulationAtRisk(acres),
-      // Centroid used to draw the alert-zone polygon (see buildAlertZones).
-      centroid: point,
-      // spread_rate isn't in the CAL FIRE feed — leave undefined; popup tolerates it
-    },
-  }
+// Normalize the API base so callers can pass with or without a trailing slash.
+// CDK's RestApi.url output ends in /, manual entries usually don't.
+function firesUrl() {
+  if (!API_BASE) throw new Error('VITE_API_URL is not set')
+  return `${API_BASE.replace(/\/$/, '')}/fires`
 }
 
 // Polygon centroid via average of ring vertices (close enough for our convex
@@ -111,6 +77,26 @@ function polygonCentroid(geometry) {
   return [sx / n, sy / n]
 }
 
+// Records arrive with the schema in CLAUDE.md. Geometry is either a real
+// Polygon perimeter or a Point centroid; for Points we synthesize a footprint
+// from acres so they render at the same scale as polygon fires.
+function ensurePolygonGeometry(feature) {
+  const p = feature.properties || {}
+  const point = feature.geometry?.type === 'Point' ? feature.geometry.coordinates : null
+  if (!point) {
+    // Already a Polygon — keep it as-is and derive centroid for the alert zone.
+    return {
+      ...feature,
+      properties: { ...p, centroid: p.centroid || polygonCentroid(feature.geometry) },
+    }
+  }
+  return {
+    ...feature,
+    geometry: circlePolygon(point, acresToRadiusKm(p.acres_burned ?? 0)),
+    properties: { ...p, centroid: point },
+  }
+}
+
 // Derives a FeatureCollection of alert-zone circles from the fire features.
 // Kept as a separate source so the zone fill can sit under the fire footprint
 // without confusing layer stacking or hover targets.
@@ -119,15 +105,15 @@ export function buildAlertZones(fireCollection) {
     .map((f) => {
       const p = f.properties || {}
       const center = p.centroid || polygonCentroid(f.geometry)
-      if (!center) return null
-      const radius = p.alert_radius_km || alertRadiusKm(p.acres_burned)
+      const radius = p.alert_radius_km
+      if (!center || !radius) return null
       return {
         type: 'Feature',
         geometry: circlePolygon(center, radius),
         properties: {
           fire_id: p.fire_id,
           name: p.name,
-          population_at_risk: p.population_at_risk ?? estimatePopulationAtRisk(p.acres_burned),
+          population_at_risk: p.population_at_risk,
           alert_radius_km: radius,
         },
       }
@@ -136,47 +122,24 @@ export function buildAlertZones(fireCollection) {
   return { type: 'FeatureCollection', features }
 }
 
-// Mock fires are stored in our normalized schema as Points + acres_burned, then
-// run through the same synthesis pipeline as live (so alert radius, centroid,
-// stubs, and footprint all derive from the same code path).
-function normalizeMockFeature(f) {
-  const p = f.properties || {}
-  const point = f.geometry?.type === 'Point' ? f.geometry.coordinates : null
-  const acres = p.acres_burned ?? 0
-  const geometry = point
-    ? circlePolygon(point, acresToRadiusKm(acres))
-    : f.geometry
-  return {
-    type: 'Feature',
-    geometry,
-    properties: {
-      ...p,
-      acres_burned: acres,
-      alert_radius_km: alertRadiusKm(acres),
-      population_at_risk: p.population_at_risk ?? estimatePopulationAtRisk(acres),
-      centroid: point || polygonCentroid(f.geometry),
-    },
-  }
-}
-
 async function fetchMock() {
   const res = await fetch(MOCK_URL, { cache: 'no-store' })
   if (!res.ok) throw new Error(`failed to fetch mock fires (${res.status})`)
   const raw = await res.json()
   return {
     type: 'FeatureCollection',
-    features: (raw.features || []).map(normalizeMockFeature),
+    features: (raw.features || []).map(ensurePolygonGeometry),
   }
 }
 
 async function fetchLive() {
-  const res = await fetch(CALFIRE_URL, { cache: 'no-store' })
-  if (!res.ok) throw new Error(`failed to fetch CAL FIRE (${res.status})`)
+  const res = await fetch(firesUrl(), { cache: 'no-store' })
+  if (!res.ok) throw new Error(`failed to fetch /fires (${res.status})`)
   const raw = await res.json()
-  const features = (raw.features || [])
-    .filter((f) => f?.properties?.IsActive)
-    .map(normalizeCalFireFeature)
-  return { type: 'FeatureCollection', features }
+  return {
+    type: 'FeatureCollection',
+    features: (raw.features || []).map(ensurePolygonGeometry),
+  }
 }
 
 export async function fetchActiveFires() {

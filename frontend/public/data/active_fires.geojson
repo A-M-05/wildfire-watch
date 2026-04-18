@@ -1,19 +1,28 @@
 {
   "type": "FeatureCollection",
-  "_comment": "Demo dataset. Five fires spanning the full size + containment spectrum so the UI shows differentiated footprints, alert halos, and evac routes. Toggled by VITE_USE_MOCK_FIRES=true.",
+  "_comment": "Demo dataset. Five fires spanning the full size + containment spectrum so the UI shows differentiated footprints, alert halos, and evac routes. Toggled by VITE_USE_MOCK_FIRES=true. Enriched fields (risk_score, confidence, population_at_risk, alert_radius_km, wind_*) are pre-baked here so mock mode renders the same UI as the live /fires endpoint.",
   "features": [
     {
       "type": "Feature",
       "properties": {
         "fire_id": "demo-malibu-grass",
+        "source": "CALFIRE",
         "name": "Pacific Coast Grass Fire",
+        "lat": 34.04,
+        "lon": -118.587,
         "containment_pct": 85,
         "acres_burned": 220,
         "spread_rate_km2_per_hr": 0.3,
         "county": "Los Angeles",
         "location": "PCH near Topanga Canyon Blvd",
         "detected_at": "2026-04-18T18:42:00Z",
-        "last_updated": "2026-04-18T20:35:00Z"
+        "last_updated": "2026-04-18T20:35:00Z",
+        "confidence": 0.78,
+        "risk_score": 0.31,
+        "wind_speed_ms": 4.1,
+        "wind_direction_deg": 245,
+        "population_at_risk": 1800,
+        "alert_radius_km": 4.2
       },
       "geometry": { "type": "Point", "coordinates": [-118.587, 34.04] }
     },
@@ -21,14 +30,23 @@
       "type": "Feature",
       "properties": {
         "fire_id": "demo-thousand-oaks",
+        "source": "CALFIRE",
         "name": "Thousand Oaks Fire",
+        "lat": 34.21,
+        "lon": -118.835,
         "containment_pct": 45,
         "acres_burned": 1800,
         "spread_rate_km2_per_hr": 1.4,
         "county": "Ventura",
         "location": "Conejo Valley, north of US-101",
         "detected_at": "2026-04-18T14:00:00Z",
-        "last_updated": "2026-04-18T20:30:00Z"
+        "last_updated": "2026-04-18T20:30:00Z",
+        "confidence": 0.83,
+        "risk_score": 0.58,
+        "wind_speed_ms": 6.8,
+        "wind_direction_deg": 220,
+        "population_at_risk": 14200,
+        "alert_radius_km": 9.4
       },
       "geometry": { "type": "Point", "coordinates": [-118.835, 34.21] }
     },
@@ -36,14 +54,23 @@
       "type": "Feature",
       "properties": {
         "fire_id": "demo-cleveland-nf",
+        "source": "CALFIRE",
         "name": "Cleveland NF Complex",
+        "lat": 33.04,
+        "lon": -116.81,
         "containment_pct": 20,
         "acres_burned": 9500,
         "spread_rate_km2_per_hr": 4.2,
         "county": "San Diego",
         "location": "Cleveland National Forest, east of Ramona",
         "detected_at": "2026-04-17T22:15:00Z",
-        "last_updated": "2026-04-18T20:33:00Z"
+        "last_updated": "2026-04-18T20:33:00Z",
+        "confidence": 0.89,
+        "risk_score": 0.71,
+        "wind_speed_ms": 8.3,
+        "wind_direction_deg": 195,
+        "population_at_risk": 38500,
+        "alert_radius_km": 17.8
       },
       "geometry": { "type": "Point", "coordinates": [-116.81, 33.04] }
     },
@@ -51,14 +78,23 @@
       "type": "Feature",
       "properties": {
         "fire_id": "demo-sierra-foothills",
+        "source": "FIRMS",
         "name": "Sierra Foothills Fire",
+        "lat": 37.20,
+        "lon": -119.25,
         "containment_pct": 12,
         "acres_burned": 28000,
         "spread_rate_km2_per_hr": 6.8,
         "county": "Fresno",
         "location": "Sierra National Forest, Big Creek drainage",
         "detected_at": "2026-04-17T09:00:00Z",
-        "last_updated": "2026-04-18T20:31:00Z"
+        "last_updated": "2026-04-18T20:31:00Z",
+        "confidence": 0.92,
+        "risk_score": 0.84,
+        "wind_speed_ms": 9.7,
+        "wind_direction_deg": 175,
+        "population_at_risk": 62000,
+        "alert_radius_km": 28.3
       },
       "geometry": { "type": "Point", "coordinates": [-119.25, 37.20] }
     },
@@ -66,14 +102,23 @@
       "type": "Feature",
       "properties": {
         "fire_id": "demo-shasta-megafire",
+        "source": "FIRMS",
         "name": "Shasta Megafire",
+        "lat": 40.62,
+        "lon": -122.62,
         "containment_pct": 4,
         "acres_burned": 78000,
         "spread_rate_km2_per_hr": 11.5,
         "county": "Shasta",
         "location": "Whiskeytown, west of Redding",
         "detected_at": "2026-04-15T11:00:00Z",
-        "last_updated": "2026-04-18T20:29:00Z"
+        "last_updated": "2026-04-18T20:29:00Z",
+        "confidence": 0.95,
+        "risk_score": 0.93,
+        "wind_speed_ms": 12.4,
+        "wind_direction_deg": 160,
+        "population_at_risk": 145000,
+        "alert_radius_km": 45.0
       },
       "geometry": { "type": "Point", "coordinates": [-122.62, 40.62] }
     }

@@ -1,12 +1,16 @@
+import os
+
 from aws_cdk import (
     Stack,
     RemovalPolicy,
     CfnOutput,
+    Duration,
     Tags,
     aws_cognito as cognito,
     aws_apigateway as apigw,
     aws_apigatewayv2 as apigwv2,
     aws_amplify as amplify,
+    aws_lambda as lambda_,
     aws_location as location,
 )
 from constructs import Construct
@@ -30,7 +34,7 @@ class FrontendStack(Stack):
         Secrets Manager, which is overkill for the hackathon.
     """
 
-    def __init__(self, scope: Construct, id: str, **kwargs):
+    def __init__(self, scope: Construct, id: str, fires_table=None, **kwargs):
         super().__init__(scope, id, **kwargs)
 
         for k, v in TAGS.items():
@@ -38,6 +42,8 @@ class FrontendStack(Stack):
 
         self._provision_cognito()
         self._provision_rest_api()
+        if fires_table is not None:
+            self._provision_fires_api(fires_table)
         self._provision_websocket_api()
         self._provision_amplify()
         self._provision_location()
@@ -140,6 +146,35 @@ class FrontendStack(Stack):
         CfnOutput(self, "RestApiId",
             value=self.rest_api.rest_api_id,
             export_name="WildfireWatch::Frontend::RestApiId",
+        )
+
+    # ------------------------------------------------------------------
+    # GET /fires — issue #105
+    # ------------------------------------------------------------------
+
+    def _provision_fires_api(self, fires_table):
+        functions_dir = os.path.join(os.path.dirname(__file__), "..", "..", "functions")
+        fires_api_fn = lambda_.Function(
+            self, "FiresApiFunction",
+            function_name="wildfire-watch-fires-api",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset(os.path.join(functions_dir, "fires_api")),
+            timeout=Duration.seconds(10),
+            memory_size=256,
+            environment={
+                "WW_DYNAMODB_FIRES_TABLE": fires_table.table_name,
+                # Falls back to "*" inside the handler when unset; set this in
+                # the AWS console to lock CORS to the Amplify origin in prod.
+                "WW_FRONTEND_ORIGIN": "*",
+            },
+        )
+        fires_table.grant_read_data(fires_api_fn)
+
+        fires = self.rest_api.root.add_resource("fires")
+        fires.add_method(
+            "GET",
+            apigw.LambdaIntegration(fires_api_fn, proxy=True),
         )
 
     # ------------------------------------------------------------------
