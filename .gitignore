@@ -1,3 +1,4 @@
+functions/*/build/
 __pycache__/
 *.py[cod]
 *.pyo
