@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { fetchDispatchData } from './api/dispatch'
 import { routeSummaryForFire } from './api/evacRoutes'
 
-// Builds a Google Maps directions deep link. Origin is the user's location
-// when they've granted geolocation, otherwise the fire centroid (safer
-// fallback than nothing — they can edit the start in Google Maps).
+// Builds a Google Maps directions deep link. Origin is set only when the user
+// has granted geolocation; otherwise we omit it and Google Maps prompts the
+// user for their starting point — better UX than guessing.
 function googleMapsDirections({ origin, destLat, destLon }) {
   if (destLat == null || destLon == null) return null
   const params = new URLSearchParams({
@@ -191,7 +191,7 @@ export default function DispatchPanel({ fire, onClose, theme = 'light' }) {
         display: 'flex', alignItems: 'center', gap: 6,
         pointerEvents: 'none',
       }}>
-        <span style={{ fontSize: 14 }}>📍</span>
+        <PinIcon />
         <span>Click a fire for details</span>
       </div>
     )
@@ -284,7 +284,7 @@ function ResidentView({ fire, data, t }) {
               onClick={request}
               disabled={status === 'requesting'}
               style={{
-                background: 'transparent', border: `1px solid ${t.inputBorder || '#ccc'}`,
+                background: 'transparent', border: `1px solid ${t.inputBorder}`,
                 color: t.textPrimary, fontSize: 12, padding: '3px 8px',
                 borderRadius: 4, cursor: status === 'requesting' ? 'wait' : 'pointer',
                 fontFamily: 'inherit',
@@ -307,19 +307,19 @@ function ResidentView({ fire, data, t }) {
       </Section>
 
       <Section t={t} title="What to do">
-        {p.evacuation_route ? (
-          <div style={{
-            background: t.evacBoxBg, border: `1px solid ${t.evacBoxBorder}`,
-            padding: '10px 12px', borderRadius: 4,
-          }}>
-            <div style={{ fontSize: 11, color: t.textMuted, marginBottom: 4 }}>EVACUATION ROUTE</div>
-            <div style={{ fontSize: 14, color: t.textPrimary, fontWeight: 600 }}>{p.evacuation_route}</div>
-            {liveRoute && (
-              <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 6 }}>
-                To <strong>{liveRoute.destination}</strong> · {liveRoute.distance_km.toFixed(0)} km · {Math.round(liveRoute.duration_min)} min in current traffic
+        <div style={{
+          background: t.evacBoxBg, border: `1px solid ${t.evacBoxBorder}`,
+          padding: '10px 12px', borderRadius: 4,
+        }}>
+          <div style={{ fontSize: 11, color: t.textMuted, marginBottom: 4 }}>EVACUATION ROUTE</div>
+          {liveRoute ? (
+            <>
+              <div style={{ fontSize: 14, color: t.textPrimary, fontWeight: 600 }}>
+                Evacuate to {liveRoute.destination}
               </div>
-            )}
-            {mapsUrl ? (
+              <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 4 }}>
+                {liveRoute.distance_km.toFixed(0)} km · {Math.round(liveRoute.duration_min)} min in current traffic
+              </div>
               <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
                 style={{
                   marginTop: 10, display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -330,17 +330,13 @@ function ResidentView({ fire, data, t }) {
                 <GoogleMapsIcon />
                 Open route in Google Maps
               </a>
-            ) : (
-              <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 6 }}>
-                Tap the fire on the map to load the live route, then a Google Maps link will appear here.
-              </div>
-            )}
-          </div>
-        ) : (
-          <div style={{ fontSize: 13, color: t.textSecondary }}>
-            Stay tuned for evacuation guidance from local officials.
-          </div>
-        )}
+            </>
+          ) : (
+            <div style={{ fontSize: 13, color: t.textSecondary }}>
+              Loading live route from Mapbox… check back in a moment.
+            </div>
+          )}
+        </div>
       </Section>
 
       {data && (
@@ -468,6 +464,17 @@ function GateNote({ t, tone }) {
       <div style={{ color: t.textPrimary, fontWeight: 600, marginBottom: 3 }}>{tone.reason}</div>
       <div style={{ color: t.textSecondary }}>{tone.action}</div>
     </div>
+  )
+}
+
+function PinIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true">
+      <path d="M12 22s7-7.5 7-13a7 7 0 0 0-14 0c0 5.5 7 13 7 13z" />
+      <circle cx="12" cy="9" r="2.5" />
+    </svg>
   )
 }
 

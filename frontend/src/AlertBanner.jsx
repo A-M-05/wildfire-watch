@@ -57,7 +57,7 @@ export default function AlertBanner({ alert, onDismiss, theme = 'light' }) {
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
         fontSize: 13, lineHeight: 1.4,
       }}>
-        <span aria-hidden="true" style={{ fontSize: 18 }}>🔔</span>
+        <BellIcon />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 700, letterSpacing: 0.2 }}>SMS alerts dispatched</div>
           <div style={{ opacity: 0.95 }}>
@@ -73,5 +73,16 @@ export default function AlertBanner({ alert, onDismiss, theme = 'light' }) {
           }}>×</button>
       </div>
     </div>
+  )
+}
+
+function BellIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true">
+      <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+    </svg>
   )
 }

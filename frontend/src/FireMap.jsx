@@ -356,7 +356,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
         ? `Evac route: <strong>${route.destination}</strong> — ` +
           `${route.distance_km.toFixed(0)} km · ${Math.round(route.duration_min)} min<br/>` +
           `<span style="color:#444;font-size:12px">${trafficLabel} (live)</span>`
-        : `Evac route: ${p.evacuation_route} (computing…)`
+        : `Evac route: computing…`
       zonePopup
         .setLngLat(e.lngLat)
         .setHTML(
