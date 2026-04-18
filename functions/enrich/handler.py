@@ -226,13 +226,24 @@ def get_dispatch_recommendation(fire_event: dict) -> dict:
         float(is_weekend),
     ]
 
+    # Built-in XGBoost container expects text/csv, not JSON.
+    # Response is comma-separated probabilities: "0.07,0.02,0.91"
+    csv_body = ",".join(str(f) for f in features)
     resp = _get_sm().invoke_endpoint(
         EndpointName=SAGEMAKER_ENDPOINT,
-        ContentType="application/json",
-        Accept="application/json",
-        Body=json.dumps({"features": features}),
+        ContentType="text/csv",
+        Accept="text/csv",
+        Body=csv_body,
     )
-    return json.loads(resp["Body"].read())
+    probs = [float(x) for x in resp["Body"].read().decode().strip().split(",")]
+    labels = ["LOCAL", "MUTUAL_AID", "AERIAL"]
+    predicted_idx = probs.index(max(probs))
+    return {
+        "dispatch_level": predicted_idx,
+        "recommendation": labels[predicted_idx],
+        "confidence": max(probs),
+        "probabilities": {labels[i]: probs[i] for i in range(3)},
+    }
 
 
 # ------------------------------------------------------------------
