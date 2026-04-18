@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { fetchDispatchData } from './api/dispatch'
 
 // Resident-facing safety badge. Frames the CLAUDE.md confidence gate from the
@@ -29,7 +29,6 @@ function safetyTone(score) {
   }
 }
 
-// Dispatcher view tone — kept for the AI-safety track demo.
 function dispatcherTone(score) {
   if (score < 0.65) {
     return {
@@ -61,6 +60,35 @@ const STATUS_TONE = {
   staged: '#888',
 }
 
+// Theme tokens — keeps the rest of the file readable. Light values are the
+// originals; dark values target the same role at the same contrast level
+// against the dark basemap.
+function tokens(theme) {
+  const dark = theme === 'dark'
+  return {
+    panelBg: dark ? 'rgba(24, 24, 26, 0.96)' : 'rgba(255, 255, 255, 0.97)',
+    panelShadow: dark ? '0 4px 16px rgba(0, 0, 0, 0.6)' : '0 4px 16px rgba(0, 0, 0, 0.25)',
+    border: dark ? '#2a2a2d' : '#e5e5e5',
+    borderSoft: dark ? '#222225' : '#f0f0f0',
+    borderInset: dark ? '#1d1d20' : '#f5f5f5',
+    textPrimary: dark ? '#f1f1f3' : '#111',
+    textSecondary: dark ? '#bdbdc2' : '#555',
+    textMuted: dark ? '#9a9aa0' : '#666',
+    textDim: dark ? '#86868c' : '#888',
+    textVeryDim: dark ? '#6c6c72' : '#aaa',
+    eyebrow: dark ? '#cfcfd4' : '#444',
+    tabBarBg: dark ? '#1f1f22' : '#fafafa',
+    tabAccent: '#ff5533',
+    gateNoteBg: dark ? '#1d1d20' : '#fafafa',
+    evacBoxBg: dark ? '#1a2230' : '#f5f9ff',
+    evacBoxBorder: dark ? '#2a3a55' : '#d6e6ff',
+    chipBg: dark ? 'rgba(28, 28, 30, 0.92)' : 'rgba(255, 255, 255, 0.92)',
+    chipText: dark ? '#e0e0e4' : '#444',
+    chipShadow: dark ? '0 2px 6px rgba(0, 0, 0, 0.5)' : '0 2px 6px rgba(0, 0, 0, 0.15)',
+    auditGreen: dark ? '#3fcf83' : '#0e8a4e',
+  }
+}
+
 function timeAgo(iso) {
   const min = Math.max(1, Math.round((Date.now() - new Date(iso).getTime()) / 60_000))
   if (min < 60) return `${min} min ago`
@@ -68,10 +96,11 @@ function timeAgo(iso) {
   return `${hr}h ago`
 }
 
-export default function DispatchPanel({ fire, onClose }) {
+export default function DispatchPanel({ fire, onClose, theme = 'light' }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [view, setView] = useState('resident')
+  const t = useMemo(() => tokens(theme), [theme])
 
   useEffect(() => {
     if (!fire) {
@@ -90,7 +119,15 @@ export default function DispatchPanel({ fire, onClose }) {
   // of a full panel. Nudges the user without occupying a third of the map.
   if (!fire) {
     return (
-      <div style={emptyChipStyle}>
+      <div style={{
+        position: 'absolute', top: 12, right: 12, zIndex: 5,
+        background: t.chipBg, color: t.chipText,
+        padding: '6px 12px', borderRadius: 999,
+        fontSize: 12, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+        boxShadow: t.chipShadow,
+        display: 'flex', alignItems: 'center', gap: 6,
+        pointerEvents: 'none',
+      }}>
         <span style={{ fontSize: 14 }}>📍</span>
         <span>Click a fire for details</span>
       </div>
@@ -100,63 +137,80 @@ export default function DispatchPanel({ fire, onClose }) {
   const p = fire.properties
 
   return (
-    <aside style={panelStyle}>
-      <header style={headerStyle}>
+    <aside style={{
+      position: 'absolute', top: 12, right: 12, bottom: 12, width: 340,
+      background: t.panelBg, borderRadius: 6, boxShadow: t.panelShadow,
+      overflowY: 'auto', zIndex: 5,
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    }}>
+      <header style={{
+        padding: '14px 16px 12px', borderBottom: `1px solid ${t.border}`,
+        display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8,
+      }}>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 11, opacity: 0.6, letterSpacing: 1 }}>
+          <div style={{ fontSize: 11, color: t.eyebrow, letterSpacing: 1, fontWeight: 600 }}>
             {view === 'resident' ? 'COMMUNITY ALERT' : 'DISPATCH PANEL'}
           </div>
-          <h2 style={{ margin: '4px 0 0', fontSize: 18, color: '#111' }}>{p.name}</h2>
-          {p.location && <div style={{ fontSize: 12, color: '#555' }}>{p.location}</div>}
+          <h2 style={{ margin: '4px 0 0', fontSize: 18, color: t.textPrimary }}>{p.name}</h2>
+          {p.location && <div style={{ fontSize: 12, color: t.textSecondary }}>{p.location}</div>}
         </div>
-        <button onClick={onClose} style={closeBtnStyle} aria-label="Close panel">×</button>
+        <button onClick={onClose} aria-label="Close panel" style={{
+          background: 'transparent', border: 'none', fontSize: 24, lineHeight: 1,
+          cursor: 'pointer', color: t.textMuted, padding: 0, width: 24, height: 24,
+        }}>×</button>
       </header>
 
-      <div style={tabBarStyle}>
-        <Tab active={view === 'resident'} onClick={() => setView('resident')}>Resident</Tab>
-        <Tab active={view === 'dispatcher'} onClick={() => setView('dispatcher')}>Dispatcher</Tab>
+      <div style={{ display: 'flex', borderBottom: `1px solid ${t.border}`, background: t.tabBarBg }}>
+        <Tab t={t} active={view === 'resident'} onClick={() => setView('resident')}>Resident</Tab>
+        <Tab t={t} active={view === 'dispatcher'} onClick={() => setView('dispatcher')}>Dispatcher</Tab>
       </div>
 
-      {loading && <div style={loadingStyle}>Loading…</div>}
+      {loading && <div style={{ padding: '12px 16px', fontSize: 12, color: t.textDim }}>Loading…</div>}
 
       {view === 'resident' ? (
-        <ResidentView fire={fire} data={data} />
+        <ResidentView fire={fire} data={data} t={t} />
       ) : (
-        <DispatcherView fire={fire} data={data} />
+        <DispatcherView fire={fire} data={data} t={t} />
       )}
 
-      <footer style={footerStyle}>
+      <footer style={{
+        padding: '10px 16px', fontSize: 10, color: t.textVeryDim,
+        textAlign: 'center', letterSpacing: 0.3,
+      }}>
         Stub data — wire to DynamoDB + WebSocket in #30
       </footer>
     </aside>
   )
 }
 
-function ResidentView({ fire, data }) {
+function ResidentView({ fire, data, t }) {
   const p = fire.properties
   const tone = data ? safetyTone(data.confidence) : null
   return (
     <>
-      <Section title="Are you in danger?">
-        <KV k="Distance to fire" v="—" hint="Enable location" />
-        <KV k="Alert radius" v={`${(p.alert_radius_km || 0).toFixed(1)} km`} />
+      <Section t={t} title="Are you in danger?">
+        <KV t={t} k="Distance to fire" v="—" hint="Enable location" />
+        <KV t={t} k="Alert radius" v={`${(p.alert_radius_km || 0).toFixed(1)} km`} />
         {p.spread_rate_km2_per_hr ? (
-          <KV k="Fire spread rate" v={`${p.spread_rate_km2_per_hr} km²/hr`} />
+          <KV t={t} k="Fire spread rate" v={`${p.spread_rate_km2_per_hr} km²/hr`} />
         ) : null}
-        <KV k="Containment" v={`${p.containment_pct ?? 0}%`} />
+        <KV t={t} k="Containment" v={`${p.containment_pct ?? 0}%`} />
       </Section>
 
-      <Section title="What to do">
+      <Section t={t} title="What to do">
         {p.evacuation_route ? (
-          <div style={evacBoxStyle}>
-            <div style={{ fontSize: 11, color: '#666', marginBottom: 4 }}>EVACUATION ROUTE</div>
-            <div style={{ fontSize: 14, color: '#111', fontWeight: 600 }}>{p.evacuation_route}</div>
-            <div style={{ fontSize: 12, color: '#555', marginTop: 4 }}>
+          <div style={{
+            background: t.evacBoxBg, border: `1px solid ${t.evacBoxBorder}`,
+            padding: '10px 12px', borderRadius: 4,
+          }}>
+            <div style={{ fontSize: 11, color: t.textMuted, marginBottom: 4 }}>EVACUATION ROUTE</div>
+            <div style={{ fontSize: 14, color: t.textPrimary, fontWeight: 600 }}>{p.evacuation_route}</div>
+            <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 4 }}>
               Tap the fire on the map to see the live route and current traffic.
             </div>
           </div>
         ) : (
-          <div style={{ fontSize: 13, color: '#555' }}>
+          <div style={{ fontSize: 13, color: t.textSecondary }}>
             Stay tuned for evacuation guidance from local officials.
           </div>
         )}
@@ -164,25 +218,25 @@ function ResidentView({ fire, data }) {
 
       {data && (
         <>
-          <Section title="Alert status">
-            <div style={{ ...badgeStyle, background: tone.color }}>{tone.label}</div>
-            <div style={{ ...gateNoteStyle, borderLeft: `3px solid ${tone.color}` }}>
-              <div style={gateNoteReasonStyle}>{tone.reason}</div>
-              <div style={gateNoteActionStyle}>{tone.action}</div>
-            </div>
+          <Section t={t} title="Alert status">
+            <Badge color={tone.color}>{tone.label}</Badge>
+            <GateNote t={t} tone={tone} />
             {data.confidence >= 0.65 && (
-              <div style={alertMetaStyle}>
-                <KV k="Residents notified" v={data.alerts_sent.toLocaleString()} />
-                <KV k="Sent" v={timeAgo(data.alert_sent_at)} />
+              <div style={{ marginTop: 8 }}>
+                <KV t={t} k="Residents notified" v={data.alerts_sent.toLocaleString()} />
+                <KV t={t} k="Sent" v={timeAgo(data.alert_sent_at)} />
               </div>
             )}
           </Section>
 
-          <Section title="What the AI is saying">
-            <p style={{ margin: 0, fontSize: 13, lineHeight: 1.5, color: '#222' }}>
+          <Section t={t} title="What the AI is saying">
+            <p style={{ margin: 0, fontSize: 13, lineHeight: 1.5, color: t.textPrimary }}>
               {data.advisory}
             </p>
-            <div style={auditChipStyle} title={data.audit_hash}>
+            <div title={data.audit_hash} style={{
+              marginTop: 10, fontSize: 11, color: t.auditGreen,
+              fontFamily: 'ui-monospace, Menlo, monospace',
+            }}>
               ✓ Verified · audit {data.audit_hash.slice(0, 10)}…
             </div>
           </Section>
@@ -192,45 +246,47 @@ function ResidentView({ fire, data }) {
   )
 }
 
-function DispatcherView({ fire, data }) {
+function DispatcherView({ fire, data, t }) {
   const p = fire.properties
   const tone = data ? dispatcherTone(data.confidence) : null
   return (
     <>
-      <Section title="Incident">
-        <KV k="County" v={p.county || '—'} />
-        <KV k="Containment" v={`${p.containment_pct ?? 0}%`} />
-        <KV k="Acres burned" v={Number(p.acres_burned || 0).toLocaleString()} />
+      <Section t={t} title="Incident">
+        <KV t={t} k="County" v={p.county || '—'} />
+        <KV t={t} k="Containment" v={`${p.containment_pct ?? 0}%`} />
+        <KV t={t} k="Acres burned" v={Number(p.acres_burned || 0).toLocaleString()} />
         {p.spread_rate_km2_per_hr ? (
-          <KV k="Spread rate" v={`${p.spread_rate_km2_per_hr} km²/hr`} />
+          <KV t={t} k="Spread rate" v={`${p.spread_rate_km2_per_hr} km²/hr`} />
         ) : null}
       </Section>
 
       {data && (
         <>
-          <Section title="AI Advisory">
-            <div style={{ ...badgeStyle, background: tone.color }}>
-              {tone.label} · {(data.confidence * 100).toFixed(0)}%
-            </div>
-            <div style={{ ...gateNoteStyle, borderLeft: `3px solid ${tone.color}` }}>
-              <div style={gateNoteReasonStyle}>{tone.reason}</div>
-              <div style={gateNoteActionStyle}>{tone.action}</div>
-            </div>
-            <p style={{ margin: '10px 0 0', fontSize: 13, lineHeight: 1.5, color: '#222' }}>
+          <Section t={t} title="AI Advisory">
+            <Badge color={tone.color}>{tone.label} · {(data.confidence * 100).toFixed(0)}%</Badge>
+            <GateNote t={t} tone={tone} />
+            <p style={{ margin: '10px 0 0', fontSize: 13, lineHeight: 1.5, color: t.textPrimary }}>
               {data.advisory}
             </p>
           </Section>
 
-          <Section title={`Dispatched resources (${data.dispatched_units.length})`}>
+          <Section t={t} title={`Dispatched resources (${data.dispatched_units.length})`}>
             {data.dispatched_units.map((u) => (
-              <div key={u.station_id} style={unitRowStyle}>
+              <div key={u.station_id} style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '8px 0', borderTop: `1px solid ${t.borderInset}`,
+              }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: '#111' }}>{u.name}</div>
-                  <div style={{ fontSize: 11, color: '#666' }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: t.textPrimary }}>{u.name}</div>
+                  <div style={{ fontSize: 11, color: t.textMuted }}>
                     {u.units} unit{u.units > 1 ? 's' : ''} · {u.distance_km.toFixed(1)} km · ETA {u.eta_min} min
                   </div>
                 </div>
-                <span style={{ ...statusPillStyle, background: STATUS_TONE[u.status] || '#888' }}>
+                <span style={{
+                  fontSize: 10, fontWeight: 700, letterSpacing: 0.5, color: '#fff',
+                  padding: '3px 7px', borderRadius: 3, textTransform: 'uppercase', whiteSpace: 'nowrap',
+                  background: STATUS_TONE[u.status] || '#888',
+                }}>
                   {u.status}
                 </span>
               </div>
@@ -242,119 +298,65 @@ function DispatcherView({ fire, data }) {
   )
 }
 
-function Section({ title, children }) {
+function Section({ t, title, children }) {
   return (
-    <section style={sectionStyle}>
-      <h3 style={sectionTitleStyle}>{title}</h3>
+    <section style={{ padding: '12px 16px', borderBottom: `1px solid ${t.borderSoft}` }}>
+      <h3 style={{
+        margin: '0 0 8px', fontSize: 11, fontWeight: 700, letterSpacing: 1,
+        color: t.textDim, textTransform: 'uppercase',
+      }}>{title}</h3>
       {children}
     </section>
   )
 }
 
-function KV({ k, v, hint }) {
+function KV({ t, k, v, hint }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0' }}>
-      <span style={{ color: '#666' }}>{k}</span>
-      <span style={{ color: '#111', fontWeight: 500 }}>
-        {v}{hint ? <span style={{ color: '#aaa', fontWeight: 400, marginLeft: 6 }}>({hint})</span> : null}
+      <span style={{ color: t.textMuted }}>{k}</span>
+      <span style={{ color: t.textPrimary, fontWeight: 500 }}>
+        {v}{hint ? <span style={{ color: t.textVeryDim, fontWeight: 400, marginLeft: 6 }}>({hint})</span> : null}
       </span>
     </div>
   )
 }
 
-function Tab({ active, onClick, children }) {
+function Badge({ color, children }) {
+  return (
+    <div style={{
+      color: '#fff', padding: '6px 10px', borderRadius: 4,
+      fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
+      display: 'inline-block', marginBottom: 8, background: color,
+    }}>{children}</div>
+  )
+}
+
+function GateNote({ t, tone }) {
+  return (
+    <div style={{
+      background: t.gateNoteBg, padding: '8px 10px', borderRadius: 3,
+      marginBottom: 4, fontSize: 12, lineHeight: 1.45,
+      borderLeft: `3px solid ${tone.color}`,
+    }}>
+      <div style={{ color: t.textPrimary, fontWeight: 600, marginBottom: 3 }}>{tone.reason}</div>
+      <div style={{ color: t.textSecondary }}>{tone.action}</div>
+    </div>
+  )
+}
+
+function Tab({ t, active, onClick, children }) {
   return (
     <button
       onClick={onClick}
       style={{
-        ...tabStyle,
-        color: active ? '#111' : '#888',
-        borderBottom: active ? '2px solid #ff5533' : '2px solid transparent',
+        flex: 1, background: 'transparent', border: 'none',
+        padding: '10px 0', fontSize: 12, fontWeight: 600, letterSpacing: 0.5,
+        textTransform: 'uppercase', cursor: 'pointer',
+        color: active ? t.textPrimary : t.textDim,
+        borderBottom: active ? `2px solid ${t.tabAccent}` : '2px solid transparent',
       }}
     >
       {children}
     </button>
   )
-}
-
-const panelStyle = {
-  position: 'absolute',
-  top: 12,
-  right: 12,
-  bottom: 12,
-  width: 340,
-  background: 'rgba(255, 255, 255, 0.97)',
-  borderRadius: 6,
-  boxShadow: '0 4px 16px rgba(0, 0, 0, 0.25)',
-  overflowY: 'auto',
-  fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-  zIndex: 5,
-}
-const headerStyle = {
-  padding: '14px 16px 12px',
-  borderBottom: '1px solid #e5e5e5',
-  display: 'flex',
-  justifyContent: 'space-between',
-  alignItems: 'flex-start',
-  gap: 8,
-}
-const closeBtnStyle = {
-  background: 'transparent', border: 'none', fontSize: 24, lineHeight: 1,
-  cursor: 'pointer', color: '#666', padding: 0, width: 24, height: 24,
-}
-const tabBarStyle = {
-  display: 'flex', borderBottom: '1px solid #e5e5e5',
-  background: '#fafafa',
-}
-const tabStyle = {
-  flex: 1, background: 'transparent', border: 'none',
-  padding: '10px 0', fontSize: 12, fontWeight: 600, letterSpacing: 0.5,
-  textTransform: 'uppercase', cursor: 'pointer',
-}
-const sectionStyle = { padding: '12px 16px', borderBottom: '1px solid #f0f0f0' }
-const sectionTitleStyle = {
-  margin: '0 0 8px', fontSize: 11, fontWeight: 700, letterSpacing: 1,
-  color: '#888', textTransform: 'uppercase',
-}
-const unitRowStyle = {
-  display: 'flex', alignItems: 'center', gap: 8,
-  padding: '8px 0', borderTop: '1px solid #f5f5f5',
-}
-const badgeStyle = {
-  color: '#fff', padding: '6px 10px', borderRadius: 4,
-  fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
-  display: 'inline-block', marginBottom: 8,
-}
-const statusPillStyle = {
-  fontSize: 10, fontWeight: 700, letterSpacing: 0.5, color: '#fff',
-  padding: '3px 7px', borderRadius: 3, textTransform: 'uppercase', whiteSpace: 'nowrap',
-}
-const emptyChipStyle = {
-  position: 'absolute', top: 12, right: 12, zIndex: 5,
-  background: 'rgba(255, 255, 255, 0.92)', color: '#444',
-  padding: '6px 12px', borderRadius: 999,
-  fontSize: 12, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-  boxShadow: '0 2px 6px rgba(0, 0, 0, 0.15)',
-  display: 'flex', alignItems: 'center', gap: 6,
-  pointerEvents: 'none',
-}
-const loadingStyle = { padding: '12px 16px', fontSize: 12, color: '#888' }
-const gateNoteStyle = {
-  background: '#fafafa', padding: '8px 10px', borderRadius: 3,
-  marginBottom: 4, fontSize: 12, lineHeight: 1.45,
-}
-const gateNoteReasonStyle = { color: '#222', fontWeight: 600, marginBottom: 3 }
-const gateNoteActionStyle = { color: '#555' }
-const evacBoxStyle = {
-  background: '#f5f9ff', border: '1px solid #d6e6ff',
-  padding: '10px 12px', borderRadius: 4,
-}
-const alertMetaStyle = { marginTop: 8 }
-const auditChipStyle = {
-  marginTop: 10, fontSize: 11, color: '#0e8a4e',
-  fontFamily: 'ui-monospace, Menlo, monospace',
-}
-const footerStyle = {
-  padding: '10px 16px', fontSize: 10, color: '#aaa',
-  textAlign: 'center', letterSpacing: 0.3,
 }

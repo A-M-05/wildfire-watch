@@ -26,7 +26,7 @@ const STYLES = {
   dark: 'mapbox://styles/mapbox/dark-v11',
 }
 
-export default function FireMap({ selectedFire, onSelectFire }) {
+export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChange }) {
   const containerRef = useRef(null)
   const mapRef = useRef(null)
   const stationsRef = useRef(null)
@@ -36,7 +36,9 @@ export default function FireMap({ selectedFire, onSelectFire }) {
   const destsRef = useRef(null)
   const didInitTheme = useRef(false)
   const [error, setError] = useState(null)
-  const [theme, setTheme] = useState('light')
+  const setTheme = (next) => {
+    onThemeChange((prev) => (typeof next === 'function' ? next(prev) : next))
+  }
   // Selection is lifted to App so the dispatch panel can read it. We derive
   // the id locally for the evac filter; click handlers report the full feature
   // back up via onSelectFire.
