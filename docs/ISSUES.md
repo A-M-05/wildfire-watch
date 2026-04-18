@@ -17,11 +17,11 @@ Format: `#N [label] Title | Depends on: X | Blocks: Y`
                Depends on: nothing
                Blocks: #12, #13, #14
 
-#3  [infra]    Provision QLDB ledger, Step Functions safety workflow
+#3  [infra]    Provision DynamoDB audit table (hash-chain), Step Functions safety workflow
                Depends on: nothing
                Blocks: #17, #19, #20, #21
 
-#4  [infra]    Provision SNS topics, Pinpoint app, SES config
+#4  [infra]    Provision SNS broadcast topic, SES dispatcher identity
                Depends on: nothing
                Blocks: #22, #23, #24
 
@@ -85,7 +85,7 @@ Format: `#N [label] Title | Depends on: X | Blocks: Y`
                Depends on: #1
                Blocks: #21, #22
 
-#17 [safety]   Implement QLDB prediction + alert logging
+#17 [safety]   Implement DynamoDB hash-chain prediction + alert logging
                Depends on: #1, #3
                Blocks: #19, #22, #32
 
@@ -101,7 +101,7 @@ Format: `#N [label] Title | Depends on: X | Blocks: Y`
                Depends on: #3, #13
                Blocks: nothing (monitoring)
 
-#21 [safety]   Safety gate Lambda — Guardrails + QLDB + confidence check
+#21 [safety]   Safety gate Lambda — Guardrails + audit hash-chain + confidence check
                Depends on: #3, #14, #16, #17
                Blocks: #22, #32
 ```
@@ -109,7 +109,7 @@ Format: `#N [label] Title | Depends on: X | Blocks: Y`
 ## Alerting (22–24)
 
 ```
-#22 [alert]    Alert sender Lambda — Pinpoint SMS + SNS by GPS radius
+#22 [alert]    Alert sender Lambda — direct SNS SMS by GPS radius
                Depends on: #4, #10, #19, #21
                Blocks: #23, #32
 
@@ -157,7 +157,7 @@ Format: `#N [label] Title | Depends on: X | Blocks: Y`
                Depends on: #8, #9, #10, #22
                Blocks: nothing
 
-#32 [testing]  Integration test + safety contract test — QLDB written before alert fires
+#32 [testing]  Integration test + safety contract test — audit row written before alert fires
                Depends on: #17, #21, #22
                Blocks: nothing
 ```
@@ -177,7 +177,7 @@ Format: `#N [label] Title | Depends on: X | Blocks: Y`
      ↓
 #9                  (enrichment, needs #8 + #11 + #13)
      ↓
-#10, #14, #16, #17  (EventBridge rule + Bedrock prompt + Guardrails + QLDB — parallel)
+#10, #14, #16, #17  (EventBridge rule + Bedrock prompt + Guardrails + audit chain — parallel)
      ↓
 #21                 (safety gate Lambda)
      ↓
