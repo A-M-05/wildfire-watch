@@ -57,6 +57,17 @@ export default function App() {
         theme={theme}
         onThemeChange={setTheme}
         onFiresLoaded={handleFiresLoaded}
+        onAlertSent={(msg) => {
+          // Real `alert_sent` from the WebSocket — supersedes the simulated
+          // driver in handleFiresLoaded for any fire it covers.
+          announcedRef.current.add(msg.fire_id)
+          setActiveAlert({
+            fire_id: msg.fire_id,
+            fire_name: msg.fire_name,
+            alerts_sent: msg.alerts_sent,
+            audit_hash: msg.audit_hash,
+          })
+        }}
       />
       <StatusPill fireCount={fireCount} lastUpdated={lastUpdated} theme={theme} />
       <AlertBanner alert={activeAlert} onDismiss={() => setActiveAlert(null)} theme={theme} />
