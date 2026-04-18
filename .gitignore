@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+cdk.out/
+.cdk.staging/
+node_modules/
+*.js.map
+dist/
+.env
+*.egg-info/
