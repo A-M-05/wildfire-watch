@@ -32,7 +32,7 @@ A real-time wildfire resource dispatch and community alert system. Two hackathon
 ## Issue workflow
 
 1. Check `docs/ISSUES.md` for dependencies before starting anything
-2. Run `/claim N` to assign yourself and verify deps are clear
+2. Run `/claim N` to assign yourself and verify deps are clear-- make sure the issue is not already claimed
 3. Work the issue using the relevant agent in `.claude/agents/`
 4. Read the relevant SKILL.md in `.claude/skills/` before writing code
 5. Commit with `[#N]` in the message
