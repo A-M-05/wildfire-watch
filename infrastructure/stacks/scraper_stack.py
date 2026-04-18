@@ -22,7 +22,7 @@ _SCRAPER_BUILD = os.path.abspath(
 
 
 class ScraperStack(Stack):
-    """Issues #6 + #7 — FIRMS (3h) and CAL FIRE (10min) pollers via EventBridge."""
+    """Issues #6, #7, #11 — FIRMS + CAL FIRE pollers via EventBridge, NOAA on-demand."""
 
     def __init__(
         self,
@@ -97,4 +97,27 @@ class ScraperStack(Stack):
         cdk.CfnOutput(self, "CalFirePollLambdaArn",
             value=calfire_fn.function_arn,
             export_name="WildfireWatch::Scraper::CalFirePollLambdaArn",
+        )
+
+        # --- Issue #11: NOAA weather (on-demand, invoked by enrichment Lambda #9) ---
+        noaa_fn = lambda_.Function(
+            self, "NoaaPoller",
+            function_name="wildfire-watch-noaa-poller",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="noaa_poller.handler",
+            code=lambda_.Code.from_asset(_SCRAPER_BUILD),
+            timeout=Duration.seconds(30),
+            memory_size=256,
+            environment={
+                "WW_DYNAMODB_FIRES_TABLE": fires_table.table_name,
+            },
+        )
+
+        fires_table.grant_read_write_data(noaa_fn)
+        self.noaa_fn = noaa_fn
+
+        cdk.CfnOutput(self, "NoaaPollerLambdaArn",
+            value=noaa_fn.function_arn,
+            export_name="WildfireWatch::Scraper::NoaaPollerLambdaArn",
+            description="Invoked synchronously by enrichment Lambda (#9) for wind data",
         )
