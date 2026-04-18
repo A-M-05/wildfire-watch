@@ -26,7 +26,7 @@ const STYLES = {
   dark: 'mapbox://styles/mapbox/dark-v11',
 }
 
-export default function FireMap() {
+export default function FireMap({ selectedFire, onSelectFire }) {
   const containerRef = useRef(null)
   const mapRef = useRef(null)
   const stationsRef = useRef(null)
@@ -37,9 +37,10 @@ export default function FireMap() {
   const didInitTheme = useRef(false)
   const [error, setError] = useState(null)
   const [theme, setTheme] = useState('light')
-  // Click a fire to toggle its evac route. Single-select keeps the map readable
-  // (a dozen overlapping routes turns into spaghetti). null = no route shown.
-  const [selectedFireId, setSelectedFireId] = useState(null)
+  // Selection is lifted to App so the dispatch panel can read it. We derive
+  // the id locally for the evac filter; click handlers report the full feature
+  // back up via onSelectFire.
+  const selectedFireId = selectedFire?.properties?.fire_id ?? null
   const selectedFireIdRef = useRef(null)
   selectedFireIdRef.current = selectedFireId
 
@@ -372,14 +373,19 @@ export default function FireMap() {
     // Click a fire footprint to toggle its evac route. Click again on the same
     // fire (or any empty space) to hide it. Single-fire selection only.
     map.on('click', 'fires-fill', (e) => {
-      const id = e.features[0]?.properties?.fire_id
-      if (!id) return
+      const f = e.features[0]
+      if (!f?.properties?.fire_id) return
       e.originalEvent.__fireClick = true   // suppress the empty-space deselect below
-      setSelectedFireId((prev) => (prev === id ? null : id))
+      // queryRenderedFeatures returns a flat clone — find the matching feature
+      // in firesRef so the panel gets the full property bag (centroid, etc.)
+      const full = firesRef.current?.features?.find(
+        (x) => x.properties.fire_id === f.properties.fire_id,
+      ) || f
+      onSelectFire((prev) => (prev?.properties?.fire_id === full.properties.fire_id ? null : full))
     })
     map.on('click', (e) => {
       if (e.originalEvent.__fireClick) return
-      setSelectedFireId(null)
+      onSelectFire(null)
     })
 
     return () => {
