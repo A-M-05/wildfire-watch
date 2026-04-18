@@ -126,12 +126,9 @@ class FrontendStack(Stack):
             ),
         )
 
-        # Cognito authorizer — feature stacks reference this when binding routes
-        self.residents_authorizer = apigw.CognitoUserPoolsAuthorizer(
-            self, "ResidentsAuthorizer",
-            authorizer_name="residents-authorizer",
-            cognito_user_pools=[self.residents_pool],
-        )
+        # Feature stacks that need Cognito auth create their own authorizer
+        # referencing the exported pool ID — authorizers must be attached to a
+        # route at creation time, which this stack doesn't have yet.
 
         CfnOutput(self, "RestApiUrl",
             value=self.rest_api.url,

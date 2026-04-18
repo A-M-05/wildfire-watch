@@ -11,7 +11,7 @@ from constructs import Construct
 
 TAGS = {"Project": "wildfire-watch", "Env": "hackathon"}
 
-SES_DISPATCHER_IDENTITY = "dispatch@wildfire-watch.local"
+SES_DISPATCHER_IDENTITY = "spammyrobot@gmail.com"
 
 
 class MessagingStack(Stack):
