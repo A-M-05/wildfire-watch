@@ -434,20 +434,27 @@ export default function FireMap({ selectedFire, onSelectFire }) {
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
       <button
         onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+        aria-label={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+        title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
         style={{
-          position: 'absolute', top: 12, right: 12, padding: '8px 12px',
+          position: 'absolute', top: 12, left: 12, width: 36, height: 36,
           background: theme === 'light' ? '#1a1a1a' : '#f5f5f5',
           color: theme === 'light' ? '#f5f5f5' : '#1a1a1a',
-          border: 'none', borderRadius: 4, cursor: 'pointer',
-          fontFamily: 'monospace', fontSize: 13, fontWeight: 600,
-          boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+          border: 'none', borderRadius: '50%', cursor: 'pointer',
+          padding: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
+          transition: 'transform 0.25s ease',
+          zIndex: 6,
         }}
+        onMouseEnter={(e) => (e.currentTarget.style.transform = 'rotate(20deg)')}
+        onMouseLeave={(e) => (e.currentTarget.style.transform = 'rotate(0)')}
       >
-        {theme === 'light' ? 'Dark' : 'Light'}
+        {theme === 'light' ? <MoonIcon /> : <SunIcon />}
       </button>
       {error && (
         <div style={{
-          position: 'absolute', top: 12, left: 12, padding: '8px 12px',
+          position: 'absolute', top: 12, left: 60, padding: '8px 12px',
           background: 'rgba(180, 30, 30, 0.9)', color: '#fff', borderRadius: 4,
           fontFamily: 'monospace', fontSize: 13,
         }}>
@@ -455,5 +462,25 @@ export default function FireMap({ selectedFire, onSelectFire }) {
         </div>
       )}
     </div>
+  )
+}
+
+function SunIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true">
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+    </svg>
+  )
+}
+
+function MoonIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"
+      aria-hidden="true">
+      <path d="M20.5 14.3a8 8 0 1 1-10.8-10.8 8 8 0 0 0 10.8 10.8z" />
+    </svg>
   )
 }

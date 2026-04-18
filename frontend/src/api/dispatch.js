@@ -116,16 +116,46 @@ async function fakeDispatchedUnits(fire) {
   })
 }
 
-// Public entry — returns everything the dispatch panel needs for a given fire.
+// Audit hash chain — each alert gets a deterministic SHA-like fingerprint so
+// residents can see proof the safety gate ran. Real chain is written by the
+// safety-gate Lambda (#21) into the wildfire-watch-audit DynamoDB table; this
+// stub just renders something hash-looking from the fire_id.
+function fakeAuditHash(fire) {
+  const seed = (fire.properties?.fire_id || fire.properties?.name || 'unknown') + '|audit'
+  let h = 2166136261
+  const out = []
+  for (let i = 0; i < 8; i++) {
+    for (let j = 0; j < seed.length; j++) h = Math.imul(h ^ (seed.charCodeAt(j) + i), 16777619)
+    out.push((h >>> 0).toString(16).padStart(8, '0'))
+  }
+  return '0x' + out.join('').slice(0, 40)
+}
+
+// Mock alert-sent timestamp — stable per fire so the UI doesn't flicker.
+// Real timestamp comes from the alert sender (#22) when sns.publish returns.
+function fakeAlertSentAt(fire) {
+  const seed = hash01(fire.properties?.fire_id || '')
+  // Push the timestamp 2-30 minutes into the past so "X min ago" reads well.
+  const minutesAgo = Math.round(2 + seed * 28)
+  return new Date(Date.now() - minutesAgo * 60_000).toISOString()
+}
+
+// Public entry — returns everything both panel views need for a given fire.
 // One async call so the panel can show a single loading state.
 export async function fetchDispatchData(fire) {
   if (!fire) return null
   const [units] = await Promise.all([fakeDispatchedUnits(fire)])
+  const population = fire.properties?.population_at_risk ?? 0
   return {
     fire_id: fire.properties.fire_id,
     confidence: fakeConfidence(fire),
     advisory: fakeAdvisory(fire),
     dispatched_units: units,
+    // Resident-facing fields. Alerts go to ~85-95% of at-risk residents
+    // (the rest haven't registered for SMS yet).
+    alerts_sent: Math.round(population * (0.85 + hash01(fire.properties.fire_id || '') * 0.1)),
+    alert_sent_at: fakeAlertSentAt(fire),
+    audit_hash: fakeAuditHash(fire),
     generated_at: new Date().toISOString(),
   }
 }
