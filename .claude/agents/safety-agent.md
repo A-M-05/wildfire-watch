@@ -1,6 +1,6 @@
 # Safety Agent
 
-**Owns:** QLDB audit log, Bedrock Guardrails, SageMaker Clarify, Model Monitor, Step Functions gate
+**Owns:** Audit hash-chain (DynamoDB), Bedrock Guardrails, SageMaker Clarify, Model Monitor, Step Functions gate
 **Issues:** #16, #17, #18, #19, #20, #21
 
 ## Responsibilities
@@ -10,7 +10,7 @@ This agent owns the AI Safety layer. Every line of code here is load-bearing —
 ## The four safety mechanisms
 
 1. **Bedrock Guardrails (#16)** — blocks advisories with false certainty, PII, or unsafe content
-2. **QLDB audit log (#17)** — immutable record of every prediction and alert, written BEFORE action
+2. **DynamoDB audit hash-chain (#17)** — append-only record of every prediction and alert, written BEFORE action; immutability enforced by SHA-256 chain (see `.claude/skills/ai-safety/SKILL.md`)
 3. **SageMaker Clarify (#18)** — equity audit of the dispatch model
 4. **Human-in-the-loop gate (#19)** — Step Functions pause when confidence < 0.65
 5. **Model Monitor (#20)** — detects distribution shift in fire behavior inputs
@@ -53,37 +53,17 @@ def validate_advisory(advisory_text: str, confidence: float) -> dict:
     }
 ```
 
-## Issue #17 — QLDB audit logging
+## Issue #17 — Audit hash-chain logging (DynamoDB)
 
-**Hard rule:** QLDB write must complete before any alert is sent. This is a contract, not a preference.
+**Hard rule:** The audit `PutItem` must complete before any alert is sent. This is a contract, not a preference.
 
-```python
-# Write a prediction record
-def log_prediction(fire_id, dispatch_recommendation, confidence, advisory_text):
-    qldb_driver.execute_lambda(
-        lambda txn: txn.execute_statement(
-            "INSERT INTO predictions ?",
-            {
-                'fire_id': fire_id,
-                'timestamp': datetime.utcnow().isoformat(),
-                'dispatch_recommendation': dispatch_recommendation,
-                'confidence': confidence,
-                'advisory_text': advisory_text,
-                'guardrails_passed': None,  # updated after validation
-                'alert_sent': False
-            }
-        )
-    )
+The full pattern (record schema, hash computation, chain verification) lives in `.claude/skills/ai-safety/SKILL.md`. Read it before writing this Lambda. Headline points:
 
-# Update after alert fires
-def mark_alert_sent(prediction_id, alert_id):
-    qldb_driver.execute_lambda(
-        lambda txn: txn.execute_statement(
-            "UPDATE predictions SET alert_sent = true, alert_id = ? WHERE prediction_id = ?",
-            alert_id, prediction_id
-        )
-    )
-```
+- Use `WW_AUDIT_TABLE` env var (the DynamoDB table name).
+- Records are append-only — to update state (e.g. mark alert sent), append a NEW record that links via `linked_prediction_id`. Never `UpdateItem` an existing row, that breaks the chain.
+- Each record carries `prev_hash` (SHA-256 of the prior record's `record_hash` for the same fire) and `record_hash` (SHA-256 of canonical-JSON of itself minus the hash field).
+- Use a `ConditionExpression="attribute_not_exists(prediction_id)"` on every `put_item` to prevent collisions.
+- A `mark_alert_sent` operation appends an event-row of `{event: "alert_sent", linked_prediction_id, alert_id, fire_id, prev_hash, record_hash}`.
 
 ## Issue #18 — Clarify bias audit
 
@@ -112,7 +92,7 @@ Alert: if Jensen-Shannon divergence > 0.3, emit CloudWatch alarm → SNS notific
 
 ## Issue #21 — Safety gate Lambda
 
-This Lambda is the single choke point. Nothing reaches Pinpoint without passing through here.
+This Lambda is the single choke point. Nothing reaches the SNS publish call without passing through here.
 
 ```python
 def handler(event, context):
@@ -122,13 +102,18 @@ def handler(event, context):
     # 1. Generate advisory via Bedrock
     advisory = generate_advisory(fire_event, recommendation)
 
-    # 2. Write to QLDB (MUST happen before anything else)
+    # 2. Append to audit hash-chain (MUST happen before anything else)
     prediction_id = log_prediction(fire_event['fire_id'], recommendation, advisory)
 
     # 3. Validate with Guardrails
-    guardrail_result = validate_advisory(advisory['text'], recommendation['confidence'])
+    guardrail_result = validate_advisory(advisory['text'])
+    # Append the outcome as its own audit row (see SKILL.md). Never mutate the prior row.
+    append_guardrail_outcome(
+        fire_event['fire_id'], prediction_id,
+        passed=guardrail_result['passed'],
+        reason=guardrail_result['blocked_reason'],
+    )
     if not guardrail_result['passed']:
-        update_qldb_blocked(prediction_id, guardrail_result['blocked_reason'])
         raise ValueError(f"Advisory blocked by Guardrails: {guardrail_result['blocked_reason']}")
 
     # 4. Check confidence threshold

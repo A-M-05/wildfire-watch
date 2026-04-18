@@ -5,9 +5,9 @@
 
 ## Responsibilities
 
-- Send SMS alerts to registered residents via Pinpoint, segmented by GPS radius
+- Send SMS alerts to registered residents via `sns.publish(PhoneNumber=...)`, filtered by GPS radius in this Lambda (Pinpoint is unavailable on this account — SCP blocks `mobiletargeting:CreateApp`)
 - Build the resident registration flow (Cognito + DynamoDB + location)
-- Send watershed contamination alerts via Comprehend + Bedrock + Pinpoint
+- Send watershed contamination alerts via Comprehend + Bedrock + SNS
 
 ## File layout
 
@@ -25,35 +25,36 @@ Triggered by Step Functions (after safety gate approves).
 
 ```python
 def send_alert(fire_event, advisory, prediction_id):
-    pinpoint = boto3.client('pinpoint')
+    sns = boto3.client('sns')
 
     # Get residents in risk radius from DynamoDB
     residents = get_residents_in_radius(
         lat=fire_event['lat'],
         lon=fire_event['lon'],
-        radius_km=fire_event['risk_radius_km']
+        radius_km=fire_event['risk_radius_km'],
     )
 
-    # Send to each resident
+    # Per-resident SMS — direct publish (no topic). Lambda execution role
+    # needs `sns:Publish` on `*`.
     for resident in residents:
-        pinpoint.send_messages(
-            ApplicationId=os.environ['WW_PINPOINT_APP_ID'],
-            MessageRequest={
-                'Addresses': {resident['phone']: {'ChannelType': 'SMS'}},
-                'MessageConfiguration': {
-                    'SMSMessage': {
-                        'Body': advisory['sms'],
-                        'MessageType': 'TRANSACTIONAL'
-                    }
-                }
-            }
+        sns.publish(
+            PhoneNumber=resident['phone'],
+            Message=advisory['sms'],
+            MessageAttributes={
+                'AWS.SNS.SMS.SMSType': {
+                    'DataType': 'String',
+                    'StringValue': 'Transactional',
+                },
+            },
         )
 
-    # Update QLDB — alert sent
-    mark_alert_sent(prediction_id, alert_id=fire_event['fire_id'])
+    # Append "alert_sent" event-row to the audit hash-chain (see ai-safety SKILL.md)
+    mark_alert_sent(fire_event['fire_id'], prediction_id, alert_id=fire_event['fire_id'])
 ```
 
 **NEVER log phone numbers to CloudWatch.** Log resident count only.
+
+**Cost guardrail:** `sns.publish(PhoneNumber=...)` costs ~$0.00645 per US SMS. Set `WW_DRY_RUN=true` for local testing to skip the publish call.
 
 ## Issue #23 — Resident registration
 
@@ -92,7 +93,7 @@ Flow:
 3. Feed to Comprehend to extract threat entities from news/scanner feeds
 4. Generate advisory via Bedrock (same prompt template, different context)
 5. Pass through safety gate (#21)
-6. Send to residents downstream of the watershed
+6. Send to residents downstream of the watershed via `sns.publish(PhoneNumber=...)`
 
 ## Verification
 
@@ -104,5 +105,5 @@ WW_DRY_RUN=true python functions/alert/sender.py \
   --lon -118.5 \
   --radius-km 10
 
-# Should print: "Would send to N residents" without calling Pinpoint
+# Should print: "Would send to N residents" without calling sns.publish
 ```
