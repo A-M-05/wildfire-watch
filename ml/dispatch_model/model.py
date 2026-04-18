@@ -1,82 +1,82 @@
 """
-XGBoost dispatch recommendation model — build, save, load, predict.
+XGBoost spread prediction model — build, save, load, predict.
 
-Keeping this separate from train.py means the inference Lambda (#13) can import
-load_model and predict without pulling in any training dependencies.
+Predicts fire spread rate (km²/hr) and projected area (km²) from weather
+and terrain inputs. Dispatch recommendation is derived rule-based from
+the spread rate so the decision is fully auditable.
 """
 
 import os
 import json
 import xgboost as xgb
-from features import DISPATCH_LEVELS, FEATURE_NAMES
+from features import FEATURE_NAMES, TARGET_NAMES, spread_to_dispatch, spread_to_confidence
 
 
-def build_model(max_depth: int = 6, n_estimators: int = 150, learning_rate: float = 0.1):
-    """Return an untrained XGBClassifier with the given hyperparameters.
+def build_model(max_depth: int = 6, n_estimators: int = 200, learning_rate: float = 0.05):
+    """Return an untrained XGBRegressor.
 
-    XGBoost is a gradient-boosted decision tree ensemble. It builds trees
-    sequentially where each new tree corrects the errors of the previous ones.
-    predict_proba gives us per-class probabilities — that's where the
-    confidence score (max probability) comes from.
+    XGBoost regression builds trees that minimize squared error on the
+    continuous spread rate target, rather than class probabilities.
+    Lower learning_rate + more trees = better generalization on tabular data.
     """
-    return xgb.XGBClassifier(
+    return xgb.XGBRegressor(
         max_depth=max_depth,
         n_estimators=n_estimators,
         learning_rate=learning_rate,
-        num_class=len(DISPATCH_LEVELS),   # 3 dispatch levels
-        objective="multi:softprob",        # output full probability distribution, not just winner
-        eval_metric="mlogloss",            # multi-class log loss for evaluation
+        objective="reg:squarederror",
+        eval_metric="rmse",
         random_state=42,
+        n_jobs=-1,
     )
 
 
-def save_model(model: xgb.XGBClassifier, model_dir: str):
-    """Save model to model_dir/model.xgb — SageMaker tars this directory into model.tar.gz."""
+def save_model(spread_model, area_model, model_dir: str):
+    """Save both models to model_dir — SageMaker tars this into model.tar.gz."""
     os.makedirs(model_dir, exist_ok=True)
-    model_path = os.path.join(model_dir, "model.xgb")
-    model.save_model(model_path)
+    spread_model.save_model(os.path.join(model_dir, "spread_model.xgb"))
+    area_model.save_model(os.path.join(model_dir, "area_model.xgb"))
 
-    # Save feature names alongside the model so the endpoint can validate input order.
-    meta_path = os.path.join(model_dir, "feature_meta.json")
-    with open(meta_path, "w") as f:
-        json.dump({"feature_names": FEATURE_NAMES, "dispatch_levels": DISPATCH_LEVELS}, f)
-
-    return model_path
+    meta = {"feature_names": FEATURE_NAMES, "target_names": TARGET_NAMES}
+    with open(os.path.join(model_dir, "feature_meta.json"), "w") as f:
+        json.dump(meta, f)
 
 
-def load_model(model_dir: str) -> xgb.XGBClassifier:
-    """Load model from model_dir — called by the SageMaker endpoint container at startup."""
-    model = xgb.XGBClassifier()
-    model.load_model(os.path.join(model_dir, "model.xgb"))
-    return model
+def load_models(model_dir: str):
+    """Load both models — called by the SageMaker endpoint at startup."""
+    spread_model = xgb.XGBRegressor()
+    spread_model.load_model(os.path.join(model_dir, "spread_model.xgb"))
+    area_model = xgb.XGBRegressor()
+    area_model.load_model(os.path.join(model_dir, "area_model.xgb"))
+    return spread_model, area_model
 
 
-def predict(model: xgb.XGBClassifier, features: list) -> dict:
-    """Run inference and return recommendation + confidence.
-
-    Args:
-        features: list of floats in FEATURE_NAMES order (use features.extract_features)
+def predict(spread_model, area_model, features: list) -> dict:
+    """Run inference and return spread predictions + derived dispatch recommendation.
 
     Returns:
-        dict with:
-          dispatch_level (int 0-2)
-          recommendation (str "LOCAL" | "MUTUAL_AID" | "AERIAL")
-          confidence (float 0-1) — probability of the winning class
-          probabilities (dict) — full class probability breakdown
+        spread_rate_km2_per_hr: predicted fire growth rate
+        projected_area_km2: estimated area burned in next 30 minutes
+        recommendation: LOCAL | MUTUAL_AID | AERIAL (rule-based from spread rate)
+        dispatch_level: 0 | 1 | 2
+        confidence: 0-1 score (low near dispatch thresholds, high when clear)
     """
     import numpy as np
 
-    # XGBoost expects a 2D array — one row per sample.
     X = np.array([features])
-    probs = model.predict_proba(X)[0]   # shape (3,) — one prob per dispatch level
+    spread_rate = float(spread_model.predict(X)[0])
+    projected_area = float(area_model.predict(X)[0])
 
-    dispatch_level = int(np.argmax(probs))
-    confidence = float(probs[dispatch_level])
+    # Clamp to physically meaningful range
+    spread_rate = max(0.0, spread_rate)
+    projected_area = max(0.0, projected_area)
+
+    recommendation, dispatch_level = spread_to_dispatch(spread_rate)
+    confidence = spread_to_confidence(spread_rate, projected_area)
 
     return {
+        "spread_rate_km2_per_hr": round(spread_rate, 3),
+        "projected_area_km2": round(projected_area, 3),
+        "recommendation": recommendation,
         "dispatch_level": dispatch_level,
-        "recommendation": DISPATCH_LEVELS[dispatch_level],
         "confidence": confidence,
-        # Full breakdown for transparency in the dispatch panel (#28).
-        "probabilities": {DISPATCH_LEVELS[i]: float(p) for i, p in enumerate(probs)},
     }
