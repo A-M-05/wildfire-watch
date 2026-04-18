@@ -1,0 +1,35 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "region_id": "socal-ventura",
+        "name": "Ventura County",
+        "population": 843843,
+        "risk_level": "high"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-119.8, 34.0], [-118.6, 34.0], [-118.6, 34.9], [-119.8, 34.9], [-119.8, 34.0]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "region_id": "socal-la-north",
+        "name": "LA County North",
+        "population": 1200000,
+        "risk_level": "high"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-118.8, 34.1], [-117.8, 34.1], [-117.8, 34.7], [-118.8, 34.7], [-118.8, 34.1]
+        ]]
+      }
+    }
+  ]
+}

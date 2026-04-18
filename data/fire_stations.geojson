@@ -1,0 +1,55 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "station_id": "cal-fire-sto-001",
+        "name": "CAL FIRE Thousand Oaks Station",
+        "available": true,
+        "units": 3
+      },
+      "geometry": { "type": "Point", "coordinates": [-118.8376, 34.1706] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "station_id": "cal-fire-ven-001",
+        "name": "CAL FIRE Ventura Station",
+        "available": true,
+        "units": 4
+      },
+      "geometry": { "type": "Point", "coordinates": [-119.2290, 34.2805] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "station_id": "cal-fire-la-001",
+        "name": "CAL FIRE Los Angeles Station",
+        "available": false,
+        "units": 2
+      },
+      "geometry": { "type": "Point", "coordinates": [-118.2437, 34.0522] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "station_id": "cal-fire-malibu-001",
+        "name": "CAL FIRE Malibu Station",
+        "available": true,
+        "units": 2
+      },
+      "geometry": { "type": "Point", "coordinates": [-118.7798, 34.0259] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "station_id": "cal-fire-sb-001",
+        "name": "CAL FIRE San Bernardino Station",
+        "available": true,
+        "units": 5
+      },
+      "geometry": { "type": "Point", "coordinates": [-117.2898, 34.1083] }
+    }
+  ]
+}

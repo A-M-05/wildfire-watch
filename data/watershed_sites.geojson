@@ -1,0 +1,38 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "site_id": "USGS-11098000",
+        "name": "Ventura River near Ventura",
+        "usgs_site": "11098000",
+        "chemical_risk": "low",
+        "epa_tri_sites_within_10km": 2
+      },
+      "geometry": { "type": "Point", "coordinates": [-119.2456, 34.2781] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "site_id": "USGS-11108000",
+        "name": "Malibu Creek near Malibu",
+        "usgs_site": "11108000",
+        "chemical_risk": "medium",
+        "epa_tri_sites_within_10km": 5
+      },
+      "geometry": { "type": "Point", "coordinates": [-118.7164, 34.0431] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "site_id": "USGS-11051500",
+        "name": "Santa Ana River at Riverside",
+        "usgs_site": "11051500",
+        "chemical_risk": "high",
+        "epa_tri_sites_within_10km": 12
+      },
+      "geometry": { "type": "Point", "coordinates": [-117.3961, 33.9806] }
+    }
+  ]
+}
