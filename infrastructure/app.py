@@ -17,7 +17,8 @@ core = CoreStack(app, "WildfireWatchCore",
 ScraperStack(app, "WildfireWatchScraper",
     env=env,
     fire_stream=core.fire_stream,
-    description="Wildfire Watch — FIRMS poller Lambda + EventBridge schedule (issue #6)",
+    fires_table=core.fires_table,
+    description="Wildfire Watch — FIRMS + CAL FIRE poller Lambdas + EventBridge schedules (issues #6, #7)",
 )
 
 app.synth()
