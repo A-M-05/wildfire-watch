@@ -68,8 +68,8 @@ def generate(n_samples: int = 10_000) -> pd.DataFrame:
         lat = rng.uniform(*LAT_RANGE)
         lon = rng.uniform(*LON_RANGE)
 
-        # Wind — Weibull distribution matches observed wind speed distributions
-        wind_speed_ms = rng.weibull(a=2.0) * 6.0
+        # Wind — Weibull scaled to SoCal fire-weather conditions (Santa Ana events reach 15-25 m/s)
+        wind_speed_ms = rng.weibull(a=2.0) * 9.0
 
         wind_direction_deg = rng.uniform(0, 360)
 
@@ -82,13 +82,13 @@ def generate(n_samples: int = 10_000) -> pd.DataFrame:
             p=[0.4, 0.15, 0.15, 0.1, 0.08, 0.06, 0.04, 0.02]
         ))
 
-        # Fuel moisture — SoCal ranges from bone-dry (3%) in fall to moist (25%) in spring
+        # Fuel moisture — fires are reported under fire-weather conditions (3–15% dead fine fuel)
         # Afternoon fires (hour 12-18) tend to have lower moisture
         hour_of_day = int(rng.randint(0, 24))
         is_weekend = float(rng.random() < 0.286)
 
         # Diurnal moisture variation — drier in afternoon
-        base_moisture = rng.uniform(4, 22)
+        base_moisture = rng.uniform(3, 15)
         if 12 <= hour_of_day <= 18:
             fuel_moisture_pct = max(3.0, base_moisture * 0.75)
         else:
@@ -129,9 +129,9 @@ def generate(n_samples: int = 10_000) -> pd.DataFrame:
     print(f"  mean:   {df['spread_rate_km_hr'].mean():.3f}")
     print(f"  p90:    {df['spread_rate_km_hr'].quantile(0.9):.3f}")
     print(f"  max:    {df['spread_rate_km_hr'].max():.3f}")
-    print(f"  → would dispatch LOCAL:      {(df['spread_rate_km_hr'] < 1.2).sum()} ({(df['spread_rate_km_hr'] < 1.2).mean()*100:.1f}%)")
-    print(f"  → would dispatch MUTUAL_AID: {((df['spread_rate_km_hr'] >= 1.2) & (df['spread_rate_km_hr'] < 3.0)).sum()} ({((df['spread_rate_km_hr'] >= 1.2) & (df['spread_rate_km_hr'] < 3.0)).mean()*100:.1f}%)")
-    print(f"  → would dispatch AERIAL:     {(df['spread_rate_km_hr'] >= 3.0).sum()} ({(df['spread_rate_km_hr'] >= 3.0).mean()*100:.1f}%)")
+    print(f"  → would dispatch LOCAL:      {(df['spread_rate_km_hr'] < 0.5).sum()} ({(df['spread_rate_km_hr'] < 0.5).mean()*100:.1f}%)")
+    print(f"  → would dispatch MUTUAL_AID: {((df['spread_rate_km_hr'] >= 0.5) & (df['spread_rate_km_hr'] < 1.5)).sum()} ({((df['spread_rate_km_hr'] >= 0.5) & (df['spread_rate_km_hr'] < 1.5)).mean()*100:.1f}%)")
+    print(f"  → would dispatch AERIAL:     {(df['spread_rate_km_hr'] >= 1.5).sum()} ({(df['spread_rate_km_hr'] >= 1.5).mean()*100:.1f}%)")
 
     return df
 

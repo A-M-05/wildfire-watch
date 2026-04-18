@@ -31,9 +31,9 @@ TARGET_NAMES = ["spread_rate_km2_per_hr", "projected_area_km2"]
 # understand and challenge "spread > 3.0 → AERIAL" in a way they can't
 # challenge a gradient-boosted tree.
 DISPATCH_THRESHOLDS = {
-    "AERIAL":     3.0,   # km²/hr
-    "MUTUAL_AID": 1.2,
-    # below 1.2 → LOCAL
+    "AERIAL":     1.5,   # km/hr linear spread rate (≈20 mph midflame / Santa Ana conditions)
+    "MUTUAL_AID": 0.5,   # km/hr (≈8 mph midflame / moderate fire weather)
+    # below 0.5 → LOCAL
 }
 
 

@@ -68,7 +68,8 @@ def _get_events():
     return _events_client
 
 FIRES_TABLE = os.environ.get("WW_DYNAMODB_FIRES_TABLE", "fires")
-SAGEMAKER_ENDPOINT = os.environ.get("WW_SAGEMAKER_ENDPOINT", "wildfire-watch-dispatch")
+SAGEMAKER_SPREAD_ENDPOINT = os.environ.get("WW_SAGEMAKER_SPREAD_ENDPOINT", "wildfire-watch-spread")
+SAGEMAKER_AREA_ENDPOINT   = os.environ.get("WW_SAGEMAKER_AREA_ENDPOINT",   "wildfire-watch-area")
 CONFIDENCE_THRESHOLD = float(os.environ.get("WW_CONFIDENCE_THRESHOLD", "0.65"))
 
 # Dispatch trigger thresholds (from pipeline-agent.md)
@@ -199,9 +200,11 @@ def get_watershed_sites_at_risk(lat: float, lon: float, radius_km: float = 50.0)
 # ------------------------------------------------------------------
 
 def get_dispatch_recommendation(fire_event: dict) -> dict:
-    """Call the SageMaker endpoint and return dispatch recommendation + confidence.
+    """Call the two SageMaker regression endpoints and return spread predictions + dispatch.
 
-    Feature order must match FEATURE_NAMES in ml/dispatch_model/features.py.
+    Feature order: lat, lon, wind_speed_ms, wind_direction_deg, radiative_power,
+                   containment_pct, fuel_moisture_pct, slope_deg, hour_of_day, is_weekend
+    Must match FEATURE_NAMES in ml/dispatch_model/features.py.
     """
     detected_at = fire_event.get("detected_at", "")
     try:
@@ -211,38 +214,62 @@ def get_dispatch_recommendation(fire_event: dict) -> dict:
     except (ValueError, AttributeError):
         hour, is_weekend = 12, 0
 
-    stations = fire_event.get("nearest_stations", [])
-    nearest_dist = stations[0]["distance_km"] if stations else 50.0
-
     features = [
         float(fire_event.get("lat", 0)),
         float(fire_event.get("lon", 0)),
-        float(fire_event.get("spread_rate_km2_per_hr", 0)),
-        float(fire_event.get("population_at_risk", 0)),
-        float(nearest_dist),
         float(fire_event.get("wind_speed_ms", 0)),
+        float(fire_event.get("wind_direction_deg", 0)),
         float(fire_event.get("radiative_power", 0)),
+        float(fire_event.get("containment_pct", 0)),
+        float(fire_event.get("fuel_moisture_pct", 8.0)),   # default to fire-weather conditions
+        float(fire_event.get("slope_deg", 10.0)),
         float(hour),
         float(is_weekend),
     ]
 
-    # Built-in XGBoost container expects text/csv, not JSON.
-    # Response is comma-separated probabilities: "0.07,0.02,0.91"
     csv_body = ",".join(str(f) for f in features)
-    resp = _get_sm().invoke_endpoint(
-        EndpointName=SAGEMAKER_ENDPOINT,
-        ContentType="text/csv",
-        Accept="text/csv",
-        Body=csv_body,
+    sm = _get_sm()
+
+    spread_resp = sm.invoke_endpoint(
+        EndpointName=SAGEMAKER_SPREAD_ENDPOINT,
+        ContentType="text/csv", Accept="text/csv", Body=csv_body,
     )
-    probs = [float(x) for x in resp["Body"].read().decode().strip().split(",")]
-    labels = ["LOCAL", "MUTUAL_AID", "AERIAL"]
-    predicted_idx = probs.index(max(probs))
+    spread_rate = max(0.0, float(spread_resp["Body"].read().decode().strip()))
+
+    area_resp = sm.invoke_endpoint(
+        EndpointName=SAGEMAKER_AREA_ENDPOINT,
+        ContentType="text/csv", Accept="text/csv", Body=csv_body,
+    )
+    projected_area_30min = max(0.0, float(area_resp["Body"].read().decode().strip()))
+
+    # Dispatch thresholds (km/hr linear spread rate) — rule-based for auditability
+    if spread_rate >= 1.5:
+        recommendation, dispatch_level = "AERIAL", 2
+    elif spread_rate >= 0.5:
+        recommendation, dispatch_level = "MUTUAL_AID", 1
+    else:
+        recommendation, dispatch_level = "LOCAL", 0
+
+    # Confidence: low near decision boundaries (0.5 and 1.5 km/hr)
+    min_dist = min(abs(spread_rate - 0.5), abs(spread_rate - 1.5))
+    confidence = round(min(min_dist / 1.0, 1.0) * 0.7 + min(projected_area_30min / 2.0, 1.0) * 0.3, 3)
+
+    # Time-horizon area projections for UI time slider
+    import math as _math
+    current_area = float(fire_event.get("current_area_km2", 0.01))
+    r0 = _math.sqrt(max(current_area, 0.001) / _math.pi)
+    projections = {
+        label: round(_math.pi * (r0 + spread_rate * t) ** 2, 4)
+        for label, t in [("30min", 0.5), ("1hr", 1), ("3hr", 3), ("6hr", 6), ("12hr", 12), ("24hr", 24)]
+    }
+
     return {
-        "dispatch_level": predicted_idx,
-        "recommendation": labels[predicted_idx],
-        "confidence": max(probs),
-        "probabilities": {labels[i]: probs[i] for i in range(3)},
+        "spread_rate_km_hr":       round(spread_rate, 3),
+        "projected_area_30min_km2": round(projected_area_30min, 3),
+        "spread_projections":       projections,
+        "recommendation":           recommendation,
+        "dispatch_level":           dispatch_level,
+        "confidence":               confidence,
     }
 
 
@@ -258,7 +285,7 @@ def compute_risk_score(fire_event: dict) -> float:
     not used here — risk_score is an independent signal for the EventBridge
     dispatch trigger, while confidence gates human review.
     """
-    spread = float(fire_event.get("spread_rate_km2_per_hr", 0))
+    spread = float(fire_event.get("dispatch_recommendation", {}).get("spread_rate_km_hr", 0))
     population = float(fire_event.get("population_at_risk", 0))
     wind = float(fire_event.get("wind_speed_ms", 0))
     radiative = float(fire_event.get("radiative_power", 0))
@@ -308,7 +335,7 @@ def write_enriched_fire(enriched: dict) -> None:
         "risk_score", "wind_speed_ms", "wind_direction_deg",
         "population_at_risk", "watershed_sites_at_risk",
         "nearest_stations", "dispatch_recommendation",
-        "enriched_at",
+        "spread_rate_km_hr", "spread_projections", "enriched_at",
     ]
     for field in enriched_fields:
         if field in enriched:
@@ -377,7 +404,10 @@ def enrich_fire(fire: dict) -> dict:
     fire["watershed_sites_at_risk"] = get_watershed_sites_at_risk(lat, lon)
 
     # 5. SageMaker dispatch recommendation — requires all features above.
-    fire["dispatch_recommendation"] = get_dispatch_recommendation(fire)
+    rec = get_dispatch_recommendation(fire)
+    fire["dispatch_recommendation"] = rec
+    fire["spread_rate_km_hr"]        = rec["spread_rate_km_hr"]
+    fire["spread_projections"]       = rec["spread_projections"]
 
     # 6. Risk score — computed locally, used by EventBridge dispatch trigger.
     fire["risk_score"] = compute_risk_score(fire)
