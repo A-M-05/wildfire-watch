@@ -26,7 +26,7 @@ const STYLES = {
   dark: 'mapbox://styles/mapbox/dark-v11',
 }
 
-export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChange }) {
+export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChange, onFiresLoaded }) {
   const containerRef = useRef(null)
   const mapRef = useRef(null)
   const stationsRef = useRef(null)
@@ -225,7 +225,11 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       const zones = buildAlertZones(fires)
       firesRef.current = fires
       zonesRef.current = zones
-      if (map.isStyleLoaded()) {
+      if (onFiresLoaded) onFiresLoaded(fires)
+      // Style may report not-loaded mid-flight (Mapbox quirk after addLayer
+      // calls). Defer the paint to the next idle tick rather than dropping
+      // the data — otherwise fires only appear on the second 30s refresh.
+      const applyFires = () => {
         const fireSrc = map.getSource('active-fires')
         if (fireSrc) fireSrc.setData(fires)
         else addFiresLayer(map, fires)
@@ -233,6 +237,8 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
         if (zoneSrc) zoneSrc.setData(zones)
         else addAlertZonesLayer(map, zones)
       }
+      if (map.isStyleLoaded()) applyFires()
+      else map.once('idle', applyFires)
 
       // Evac routes are async per fire and shouldn't block the fires render.
       // Fire-and-forget; layer updates as soon as routes resolve.
@@ -355,7 +361,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
         ? `Evac route: <strong>${route.destination}</strong> — ` +
           `${route.distance_km.toFixed(0)} km · ${Math.round(route.duration_min)} min<br/>` +
           `<span style="color:#444;font-size:12px">${trafficLabel} (live)</span>`
-        : `Evac route: ${p.evacuation_route} (computing…)`
+        : `Evac route: computing…`
       zonePopup
         .setLngLat(e.lngLat)
         .setHTML(

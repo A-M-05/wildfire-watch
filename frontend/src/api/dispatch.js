@@ -144,7 +144,7 @@ function fakeAlertSentAt(fire) {
 // One async call so the panel can show a single loading state.
 export async function fetchDispatchData(fire) {
   if (!fire) return null
-  const [units] = await Promise.all([fakeDispatchedUnits(fire)])
+  const units = await fakeDispatchedUnits(fire)
   const population = fire.properties?.population_at_risk ?? 0
   return {
     fire_id: fire.properties.fire_id,

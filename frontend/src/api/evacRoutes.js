@@ -135,8 +135,9 @@ async function fetchOneRoute(fire) {
     routeCache.set(fireId, result)
     return result
   } catch (e) {
-    // Routing failures shouldn't break the rest of the map. Cache null briefly
-    // so we don't hammer a failing endpoint, but allow retry on next refresh.
+    // Routing failures shouldn't break the rest of the map. Return null without
+    // caching so the next 30s refresh retries — Mapbox blips usually clear fast
+    // and we'd rather try again than hold a stale failure for the cache TTL.
     console.warn(`evac route fetch failed for ${fireId}:`, e.message)
     return null
   }
@@ -172,6 +173,8 @@ export function routeSummaryForFire(fireId) {
   if (!r) return null
   return {
     destination: r.properties.destination_name,
+    destination_lat: r.properties.destination_lat,
+    destination_lon: r.properties.destination_lon,
     distance_km: r.properties.distance_km,
     duration_min: r.properties.duration_min,
     traffic_severity: r.properties.traffic_severity,

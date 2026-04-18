@@ -1,5 +1,67 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchDispatchData } from './api/dispatch'
+import { routeSummaryForFire } from './api/evacRoutes'
+
+// Builds a Google Maps directions deep link. Origin is set only when the user
+// has granted geolocation; otherwise we omit it and Google Maps prompts the
+// user for their starting point — better UX than guessing.
+function googleMapsDirections({ origin, destLat, destLon }) {
+  if (destLat == null || destLon == null) return null
+  const params = new URLSearchParams({
+    api: '1',
+    destination: `${destLat},${destLon}`,
+    travelmode: 'driving',
+  })
+  if (origin) params.set('origin', `${origin[1]},${origin[0]}`)
+  return `https://www.google.com/maps/dir/?${params.toString()}`
+}
+
+const EARTH_RADIUS_KM = 6371
+
+// Stored in module scope so the user only has to grant geolocation once per
+// session; the second fire they click reuses the resolved coords.
+let cachedPosition = null
+
+function haversineKm(a, b) {
+  const toRad = (d) => (d * Math.PI) / 180
+  const dLat = toRad(b[1] - a[1])
+  const dLon = toRad(b[0] - a[0])
+  const lat1 = toRad(a[1])
+  const lat2 = toRad(b[1])
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2
+  return 2 * EARTH_RADIUS_KM * Math.asin(Math.sqrt(h))
+}
+
+function useUserLocation() {
+  const [coords, setCoords] = useState(cachedPosition)
+  const [status, setStatus] = useState(cachedPosition ? 'granted' : 'idle')
+  const [error, setError] = useState(null)
+
+  const request = () => {
+    if (!('geolocation' in navigator)) {
+      setStatus('unsupported')
+      setError('Geolocation not supported on this device.')
+      return
+    }
+    setStatus('requesting')
+    setError(null)
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const next = [pos.coords.longitude, pos.coords.latitude]
+        cachedPosition = next
+        setCoords(next)
+        setStatus('granted')
+      },
+      (err) => {
+        setStatus('denied')
+        setError(err.message || 'Location request was denied.')
+      },
+      { timeout: 10_000, maximumAge: 5 * 60_000, enableHighAccuracy: false },
+    )
+  }
+
+  return { coords, status, error, request }
+}
 
 // Resident-facing safety badge. Frames the CLAUDE.md confidence gate from the
 // resident's perspective ("we don't bother you unless we're sure") rather than
@@ -82,6 +144,7 @@ function tokens(theme) {
     gateNoteBg: dark ? '#1d1d20' : '#fafafa',
     evacBoxBg: dark ? '#1a2230' : '#f5f9ff',
     evacBoxBorder: dark ? '#2a3a55' : '#d6e6ff',
+    inputBorder: dark ? '#3a3a3f' : '#d0d0d0',
     chipBg: dark ? 'rgba(28, 28, 30, 0.92)' : 'rgba(255, 255, 255, 0.92)',
     chipText: dark ? '#e0e0e4' : '#444',
     chipShadow: dark ? '0 2px 6px rgba(0, 0, 0, 0.5)' : '0 2px 6px rgba(0, 0, 0, 0.15)',
@@ -128,7 +191,7 @@ export default function DispatchPanel({ fire, onClose, theme = 'light' }) {
         display: 'flex', alignItems: 'center', gap: 6,
         pointerEvents: 'none',
       }}>
-        <span style={{ fontSize: 14 }}>📍</span>
+        <PinIcon />
         <span>Click a fire for details</span>
       </div>
     )
@@ -186,10 +249,56 @@ export default function DispatchPanel({ fire, onClose, theme = 'light' }) {
 function ResidentView({ fire, data, t }) {
   const p = fire.properties
   const tone = data ? safetyTone(data.confidence) : null
+  const { coords, status, error, request } = useUserLocation()
+
+  const distance = coords && p.centroid ? haversineKm(coords, p.centroid) : null
+  const inAlertZone = distance != null && distance <= (p.alert_radius_km || 0)
+  const liveRoute = routeSummaryForFire(p.fire_id)
+  const mapsUrl = liveRoute
+    ? googleMapsDirections({
+        origin: coords,
+        destLat: liveRoute.destination_lat,
+        destLon: liveRoute.destination_lon,
+      })
+    : null
+
   return (
     <>
+      {inAlertZone && (
+        <div style={{
+          background: '#ff3322', color: '#fff',
+          padding: '10px 16px', fontSize: 13, fontWeight: 600,
+          display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span aria-hidden="true">⚠</span>
+          You're inside this fire's alert zone — follow the evac route below.
+        </div>
+      )}
       <Section t={t} title="Are you in danger?">
-        <KV t={t} k="Distance to fire" v="—" hint="Enable location" />
+        {distance != null ? (
+          <KV t={t} k="Distance to fire" v={`${distance.toFixed(1)} km`} />
+        ) : (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13, padding: '3px 0' }}>
+            <span style={{ color: t.textMuted }}>Distance to fire</span>
+            <button
+              onClick={request}
+              disabled={status === 'requesting'}
+              style={{
+                background: 'transparent', border: `1px solid ${t.inputBorder}`,
+                color: t.textPrimary, fontSize: 12, padding: '3px 8px',
+                borderRadius: 4, cursor: status === 'requesting' ? 'wait' : 'pointer',
+                fontFamily: 'inherit',
+              }}
+            >
+              {status === 'requesting' ? 'Locating…' : 'Use my location'}
+            </button>
+          </div>
+        )}
+        {status === 'denied' && (
+          <div style={{ fontSize: 11, color: t.textDim, marginTop: 2 }}>
+            Location blocked — {error}
+          </div>
+        )}
         <KV t={t} k="Alert radius" v={`${(p.alert_radius_km || 0).toFixed(1)} km`} />
         {p.spread_rate_km2_per_hr ? (
           <KV t={t} k="Fire spread rate" v={`${p.spread_rate_km2_per_hr} km²/hr`} />
@@ -198,22 +307,36 @@ function ResidentView({ fire, data, t }) {
       </Section>
 
       <Section t={t} title="What to do">
-        {p.evacuation_route ? (
-          <div style={{
-            background: t.evacBoxBg, border: `1px solid ${t.evacBoxBorder}`,
-            padding: '10px 12px', borderRadius: 4,
-          }}>
-            <div style={{ fontSize: 11, color: t.textMuted, marginBottom: 4 }}>EVACUATION ROUTE</div>
-            <div style={{ fontSize: 14, color: t.textPrimary, fontWeight: 600 }}>{p.evacuation_route}</div>
-            <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 4 }}>
-              Tap the fire on the map to see the live route and current traffic.
+        <div style={{
+          background: t.evacBoxBg, border: `1px solid ${t.evacBoxBorder}`,
+          padding: '10px 12px', borderRadius: 4,
+        }}>
+          <div style={{ fontSize: 11, color: t.textMuted, marginBottom: 4 }}>EVACUATION ROUTE</div>
+          {liveRoute ? (
+            <>
+              <div style={{ fontSize: 14, color: t.textPrimary, fontWeight: 600 }}>
+                Evacuate to {liveRoute.destination}
+              </div>
+              <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 4 }}>
+                {liveRoute.distance_km.toFixed(0)} km · {Math.round(liveRoute.duration_min)} min in current traffic
+              </div>
+              <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
+                style={{
+                  marginTop: 10, display: 'inline-flex', alignItems: 'center', gap: 6,
+                  background: '#1a73e8', color: '#fff',
+                  padding: '7px 12px', borderRadius: 4,
+                  fontSize: 13, fontWeight: 600, textDecoration: 'none',
+                }}>
+                <GoogleMapsIcon />
+                Open route in Google Maps
+              </a>
+            </>
+          ) : (
+            <div style={{ fontSize: 13, color: t.textSecondary }}>
+              Loading live route from Mapbox… check back in a moment.
             </div>
-          </div>
-        ) : (
-          <div style={{ fontSize: 13, color: t.textSecondary }}>
-            Stay tuned for evacuation guidance from local officials.
-          </div>
-        )}
+          )}
+        </div>
       </Section>
 
       {data && (
@@ -341,6 +464,25 @@ function GateNote({ t, tone }) {
       <div style={{ color: t.textPrimary, fontWeight: 600, marginBottom: 3 }}>{tone.reason}</div>
       <div style={{ color: t.textSecondary }}>{tone.action}</div>
     </div>
+  )
+}
+
+function PinIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true">
+      <path d="M12 22s7-7.5 7-13a7 7 0 0 0-14 0c0 5.5 7 13 7 13z" />
+      <circle cx="12" cy="9" r="2.5" />
+    </svg>
+  )
+}
+
+function GoogleMapsIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 2C7.6 2 4 5.6 4 10c0 5.5 7.3 11.5 7.6 11.7.2.2.6.2.8 0C12.7 21.5 20 15.5 20 10c0-4.4-3.6-8-8-8zm0 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6z" />
+    </svg>
   )
 }
 
