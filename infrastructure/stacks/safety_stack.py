@@ -6,7 +6,9 @@ from aws_cdk import (
     Duration,
     aws_dynamodb as dynamodb,
     aws_iam as iam,
+    aws_lambda as lambda_,
     aws_stepfunctions as sfn,
+    aws_stepfunctions_tasks as tasks,
     aws_bedrock as bedrock,
 )
 from constructs import Construct
@@ -43,6 +45,7 @@ class SafetyStack(Stack):
         self._provision_audit_table()
         self._provision_guardrails()
         self._provision_step_functions_role()
+        self._provision_dispatcher_notify_lambda()
         self._provision_state_machine()
 
     # ------------------------------------------------------------------
@@ -171,45 +174,131 @@ class SafetyStack(Stack):
         )
 
     # ------------------------------------------------------------------
-    # Step Functions state machine skeleton (logic wired in #19)
+    # Dispatcher notification Lambda (issue #19)
+    # ------------------------------------------------------------------
+
+    def _provision_dispatcher_notify_lambda(self):
+        self.dispatcher_notify_fn = lambda_.Function(
+            self, "DispatcherNotifyLambda",
+            function_name="wildfire-watch-dispatcher-notify",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="dispatcher_notify.handler",
+            code=lambda_.Code.from_asset("functions/safety"),
+            timeout=Duration.seconds(30),
+            environment={
+                "WW_SNS_ALERT_TOPIC_ARN": "",   # set post-deploy from MessagingStack output
+                "WW_DYNAMODB_FIRES_TABLE": "fires",
+                "WW_CONFIDENCE_THRESHOLD": "0.65",
+            },
+        )
+
+        # Allow publishing to the dispatcher SNS topic.
+        self.dispatcher_notify_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["sns:Publish"],
+            resources=[f"arn:aws:sns:{self.region}:{self.account}:wildfire-watch-*"],
+        ))
+
+        # Allow updating the fires table to store the pending review task token.
+        self.dispatcher_notify_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["dynamodb:UpdateItem"],
+            resources=[f"arn:aws:dynamodb:{self.region}:{self.account}:table/fires"],
+        ))
+
+    # ------------------------------------------------------------------
+    # Step Functions state machine — confidence gate (issue #19)
     # ------------------------------------------------------------------
 
     def _provision_state_machine(self):
-        # Replaced by LambdaInvoke tasks in #19 / #21.
+        """Build the full safety workflow state machine.
+
+        Flow:
+          ConfidenceGate (Choice on $.recommendation.confidence)
+            ├─ >= 0.65 → SafetyGatePlaceholder → AutoApprove  [#21 wires safety gate here]
+            └─ < 0.65  → NotifyDispatcherAndWait (WAIT_FOR_TASK_TOKEN, 5-min heartbeat)
+                            ├─ approved (SendTaskSuccess) → AutoApprove
+                            └─ timeout/rejected           → EscalateAndAlert
+
+        The WAIT_FOR_TASK_TOKEN pattern: Step Functions pauses and hands the
+        dispatcher_notify Lambda a unique token. The Lambda sends it to the
+        dispatcher via SNS. The dispatcher (via UI or CLI) calls
+        sfn:SendTaskSuccess with that token to resume — or lets it expire
+        after 5 minutes to trigger auto-escalation.
+        """
+
+        # Placeholder for the safety gate Lambda (#21) — replaced when #21 is wired.
+        # Pass state forwards the full input unchanged so downstream states
+        # can still read $.recommendation.confidence, $.fire_event, etc.
         safety_gate_placeholder = sfn.Pass(
             self, "SafetyGatePlaceholder",
-            comment="Replaced by safety gate Lambda in #21",
-            result=sfn.Result.from_object({"action": "APPROVED", "confidence": 1.0}),
+            comment="Replaced by safety gate LambdaInvoke in #21",
         )
 
-        auto_approve = sfn.Pass(
-            self, "AutoApprove",
-            comment="confidence >= 0.65 — proceed to alert sender (wired in #22)",
+        # Terminal states for dispatched alerts — placeholder for #22 (alert sender).
+        alert_sender = sfn.Pass(
+            self, "AlertSender",
+            comment="Replaced by alert sender LambdaInvoke in #22",
         )
 
-        human_review = sfn.Pass(
-            self, "HumanReviewRequired",
-            comment="confidence < 0.65 — pause for dispatcher approval (wired in #19)",
-        )
+        # When no human responds within the heartbeat window, we escalate:
+        # dispatch anyway (fire waits for no one) and log the escalation.
+        escalate_and_alert = sfn.Pass(
+            self, "EscalateAndAlert",
+            comment="Heartbeat timeout — auto-escalate: dispatch without human approval",
+            parameters={
+                "escalated": True,
+                "reason": "Dispatcher did not respond within 5 minutes — auto-escalated",
+                "fire_event.$": "$$.Execution.Input.fire_event",
+            },
+        ).next(alert_sender)
 
-        # Confidence gate — non-negotiable rule from CLAUDE.md
+        # NotifyDispatcherAndWait — the human-in-the-loop gate.
+        # WAIT_FOR_TASK_TOKEN pauses execution until sfn:SendTaskSuccess/Failure.
+        # Heartbeat of 5 minutes: if no response, States.HeartbeatTimeout is raised
+        # and the catch handler routes to escalation.
+        notify_and_wait = tasks.LambdaInvoke(
+            self, "NotifyDispatcherAndWait",
+            lambda_function=self.dispatcher_notify_fn,
+            integration_pattern=sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
+            payload=sfn.TaskInput.from_object({
+                # sfn.JsonPath.task_token injects the pause token the dispatcher
+                # needs to call sfn:SendTaskSuccess to resume this execution.
+                "task_token": sfn.JsonPath.task_token,
+                "fire_event": sfn.JsonPath.string_at("$.fire_event"),
+                "recommendation": sfn.JsonPath.string_at("$.recommendation"),
+            }),
+            # 5-minute heartbeat — if no SendTaskSuccess/Failure arrives, escalate.
+            heartbeat=Duration.minutes(5),
+            result_path="$.approval_result",
+        )
+        # Route heartbeat timeout → auto-escalate. Any other error also escalates
+        # (fail-safe: when in doubt, dispatch rather than leave people unalerted).
+        notify_and_wait.add_catch(
+            escalate_and_alert,
+            errors=["States.HeartbeatTimeout", "States.TaskFailed", "States.ALL"],
+            result_path="$.error",
+        )
+        notify_and_wait.next(alert_sender)
+
+        # Confidence gate — the non-negotiable 0.65 threshold from CLAUDE.md.
+        # Reads confidence from the dispatch recommendation in the input payload.
         confidence_choice = sfn.Choice(self, "ConfidenceGate") \
             .when(
-                sfn.Condition.number_greater_than_equals("$.confidence", 0.65),
-                auto_approve,
+                sfn.Condition.number_greater_than_equals("$.recommendation.confidence", 0.65),
+                safety_gate_placeholder.next(alert_sender),
             ) \
-            .otherwise(human_review)
-
-        definition = safety_gate_placeholder.next(confidence_choice)
+            .otherwise(notify_and_wait)
 
         self.state_machine = sfn.StateMachine(
             self, "SafetyStateMachine",
             state_machine_name="wildfire-watch-safety",
-            definition_body=sfn.DefinitionBody.from_chainable(definition),
+            definition_body=sfn.DefinitionBody.from_chainable(confidence_choice),
             role=self.sfn_role,
             timeout=Duration.minutes(15),
-            comment="Safety workflow skeleton — full logic in #19/#21",
+            comment="Safety workflow: confidence gate + human review + auto-escalation",
         )
+
+        # Allow Step Functions to invoke the dispatcher notify Lambda.
+        self.dispatcher_notify_fn.grant_invoke(self.sfn_role)
 
         CfnOutput(self, "SafetyStateMachineArn",
             value=self.state_machine.state_machine_arn,
