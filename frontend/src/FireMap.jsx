@@ -456,7 +456,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       </button>
       {error && (
         <div style={{
-          position: 'absolute', top: 12, left: 60, padding: '8px 12px',
+          position: 'absolute', top: 56, left: 12, padding: '8px 12px',
           background: 'rgba(180, 30, 30, 0.9)', color: '#fff', borderRadius: 4,
           fontFamily: 'monospace', fontSize: 13,
         }}>
