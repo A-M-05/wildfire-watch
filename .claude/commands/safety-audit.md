@@ -8,17 +8,18 @@ Verifies all four safety mechanisms are wired correctly before any demo or deplo
 
 ## Checklist
 
-### 1. QLDB — Immutable audit trail
-- [ ] QLDB ledger `wildfire-watch-audit` exists and is ACTIVE
+### 1. DynamoDB hash-chain — Immutable audit trail
+- [ ] Audit table `wildfire-watch-audit` exists and is ACTIVE
   ```bash
-  aws qldb describe-ledger --name wildfire-watch-audit --query 'State'
+  aws dynamodb describe-table --table-name wildfire-watch-audit --query 'Table.TableStatus'
   ```
-- [ ] `predictions` and `alerts` tables exist in the ledger
-- [ ] Safety contract test passes (QLDB written before alert):
+- [ ] GSI `fire_id-written_at-index` exists for chain replay
+- [ ] Safety contract test passes (audit row written before alert):
   ```bash
-  python -m pytest tests/integration/test_safety_contract.py::test_qldb_written_before_alert -v
+  python -m pytest tests/integration/test_safety_contract.py::test_audit_written_before_alert -v
   ```
-- [ ] `mark_alert_sent()` is called after Pinpoint confirms delivery
+- [ ] `verify_chain(fire_id)` returns True for a recent fire (no broken `prev_hash` links)
+- [ ] `mark_alert_sent()` appends a new event-row (never UpdateItem)
 
 ### 2. Bedrock Guardrails — Advisory validation
 - [ ] Guardrail ID is set in `WW_BEDROCK_GUARDRAIL_ID` env var
@@ -27,7 +28,7 @@ Verifies all four safety mechanisms are wired correctly before any demo or deplo
   python -m pytest tests/integration/test_safety_contract.py::test_guardrails_blocks_false_certainty -v
   ```
 - [ ] Advisory containing "you are definitely safe" returns `action: GUARDRAIL_INTERVENED`
-- [ ] Blocked advisories are logged to QLDB with `blocked_reason`
+- [ ] Blocked advisories append a `guardrails_outcome` row to the audit chain with `blocked_reason`
 
 ### 3. Human-in-the-loop gate — Confidence threshold
 - [ ] Step Functions state machine exists and is ACTIVE

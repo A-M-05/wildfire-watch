@@ -19,13 +19,15 @@ A real-time wildfire resource dispatch and community alert system. Two hackathon
 | ML | SageMaker + Bedrock (claude-sonnet-4-6) |
 | Frontend | React 18 + Mapbox GL JS |
 | Hosting | AWS Amplify |
-| DB | DynamoDB (serving) + Timestream (time-series) + QLDB (audit) |
-| Messaging | Kinesis (pipeline) + SNS + Pinpoint (alerts) |
+| DB | DynamoDB (serving + audit hash-chain) + Timestream (time-series) |
+| Messaging | Kinesis (pipeline) + SNS (alerts, direct-to-phone) |
+
+> **Architecture pivot (2026-04-18):** This account's SCP blocks Pinpoint and AWS no longer accepts new QLDB ledger creation. We replaced QLDB with a DynamoDB audit table whose immutability comes from a SHA-256 hash chain written by the safety gate Lambda (#17/#21), and replaced Pinpoint per-resident SMS with `sns.publish(PhoneNumber=...)` direct calls from the alert sender (#22). Broadcast SNS topic + SES dispatcher email still apply.
 
 ## Safety rules — non-negotiable
 
-1. **QLDB is written before any alert fires.** The audit record must exist before the SMS goes out. This is a hard contract. See issue #32.
-2. **Guardrails before Pinpoint.** Every Bedrock advisory passes through Guardrails. No exceptions.
+1. **Audit record is written before any alert fires.** A hash-chained record must be committed to the DynamoDB audit table (`wildfire-watch-audit`) before the SMS goes out. This is a hard contract. See issue #32.
+2. **Guardrails before SNS publish.** Every Bedrock advisory passes through Guardrails. No exceptions.
 3. **Confidence gate.** If SageMaker dispatch confidence < 0.65, Step Functions pauses for human review. Do not lower this threshold without team consensus.
 4. **No PII in logs.** Resident phone numbers and addresses are never written to CloudWatch.
 
@@ -99,10 +101,16 @@ WW_DYNAMODB_RESIDENTS_TABLE
 WW_DYNAMODB_ALERTS_TABLE
 WW_TIMESTREAM_DB
 WW_TIMESTREAM_TABLE
-WW_QLDB_LEDGER
+WW_AUDIT_TABLE                    # DynamoDB audit ledger (replaces QLDB)
 WW_SAGEMAKER_ENDPOINT
-WW_PINPOINT_APP_ID
-WW_SNS_ALERT_TOPIC_ARN
+WW_SNS_ALERT_TOPIC_ARN            # broadcast topic; per-resident SMS uses sns.publish PhoneNumber direct
+WW_SES_DISPATCHER_IDENTITY        # verified SES sender for dispatcher email
+WW_COGNITO_RESIDENTS_POOL_ID
+WW_COGNITO_RESIDENTS_CLIENT_ID
+WW_COGNITO_DISPATCHERS_POOL_ID
+WW_COGNITO_DISPATCHERS_CLIENT_ID
+WW_API_GATEWAY_URL
+WW_WEBSOCKET_URL
 WW_MAPBOX_TOKEN
 WW_BEDROCK_GUARDRAIL_ID
 WW_STEP_FUNCTIONS_ARN
