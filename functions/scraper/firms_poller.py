@@ -115,16 +115,27 @@ def _push_to_kinesis(events: list[dict], stream_name: str):
     success = 0
     for event in events:
         try:
-            kinesis.put_record(
+            resp = kinesis.put_record(
                 StreamName=stream_name,
                 Data=json.dumps(event),
                 PartitionKey=event["fire_id"],
             )
             success += 1
-            logger.info(f"Pushed fire_id={event['fire_id']} to Kinesis")
+            logger.info(
+                "kinesis_put fire_id=%s shard=%s seq=%s payload=%s",
+                event["fire_id"],
+                resp["ShardId"],
+                resp["SequenceNumber"],
+                json.dumps(event),
+            )
         except Exception as exc:
-            logger.error(f"Failed to push fire_id={event['fire_id']}: {exc}")
-    logger.info(f"Pushed {success}/{len(events)} events to {stream_name}")
+            logger.error(
+                "kinesis_put_failed fire_id=%s error=%s payload=%s",
+                event["fire_id"],
+                exc,
+                json.dumps(event),
+            )
+    logger.info("kinesis_summary stream=%s pushed=%d total=%d", stream_name, success, len(events))
 
 
 # ---------------------------------------------------------------------------
