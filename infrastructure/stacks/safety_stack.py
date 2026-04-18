@@ -6,7 +6,10 @@ from aws_cdk import (
     Duration,
     aws_dynamodb as dynamodb,
     aws_iam as iam,
+    aws_lambda as lambda_,
     aws_stepfunctions as sfn,
+    aws_stepfunctions_tasks as tasks,
+    aws_bedrock as bedrock,
 )
 from constructs import Construct
 
@@ -40,7 +43,9 @@ class SafetyStack(Stack):
             Tags.of(self).add(k, v)
 
         self._provision_audit_table()
+        self._provision_guardrails()
         self._provision_step_functions_role()
+        self._provision_dispatcher_notify_lambda()
         self._provision_state_machine()
 
     # ------------------------------------------------------------------
@@ -77,6 +82,71 @@ class SafetyStack(Stack):
         )
 
     # ------------------------------------------------------------------
+    # Bedrock Guardrails — advisory content safety filter (issue #16)
+    # ------------------------------------------------------------------
+
+    def _provision_guardrails(self):
+        # Guardrails is a managed filter between our Bedrock call and the response.
+        # Every advisory passes through it before reaching any Lambda or resident.
+        # Rules here must stay in sync with FALSE_CERTAINTY_PHRASES in guardrails.py.
+        self.guardrail = bedrock.CfnGuardrail(
+            self, "AdvisoryGuardrail",
+            name="wildfire-watch-advisory",
+            description="Blocks false-certainty advisories and strips PII from evacuation alerts",
+            blocked_input_messaging="This input cannot be processed for safety reasons.",
+            blocked_outputs_messaging=(
+                "This advisory has been blocked for safety reasons. "
+                "A human dispatcher will issue guidance shortly."
+            ),
+            # Word policy — block phrases that imply false certainty about resident safety.
+            # These are the phrases most likely to cause harm in a real emergency.
+            word_policy_config=bedrock.CfnGuardrail.WordPolicyConfigProperty(
+                words_config=[
+                    bedrock.CfnGuardrail.WordConfigProperty(text="you are definitely safe"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="you are safe"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="no danger"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="no risk"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="all clear"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="completely safe"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="no threat"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="nothing to worry"),
+                ],
+            ),
+            # PII policy — anonymize phone numbers, addresses, and names in advisory text.
+            # Residents' contact info must never appear in AI-generated output (CLAUDE.md rule #4).
+            sensitive_information_policy_config=bedrock.CfnGuardrail.SensitiveInformationPolicyConfigProperty(
+                pii_entities_config=[
+                    bedrock.CfnGuardrail.PiiEntityConfigProperty(type="PHONE", action="ANONYMIZE"),
+                    bedrock.CfnGuardrail.PiiEntityConfigProperty(type="ADDRESS", action="ANONYMIZE"),
+                    bedrock.CfnGuardrail.PiiEntityConfigProperty(type="NAME", action="ANONYMIZE"),
+                    bedrock.CfnGuardrail.PiiEntityConfigProperty(type="EMAIL", action="ANONYMIZE"),
+                ],
+            ),
+            # Content filters — block hate/violence at MEDIUM strength.
+            # MEDIUM catches explicit content without over-blocking legitimate
+            # emergency language like "fire is threatening" or "danger zone".
+            content_policy_config=bedrock.CfnGuardrail.ContentPolicyConfigProperty(
+                filters_config=[
+                    bedrock.CfnGuardrail.ContentFilterConfigProperty(
+                        type="HATE", input_strength="MEDIUM", output_strength="MEDIUM"
+                    ),
+                    bedrock.CfnGuardrail.ContentFilterConfigProperty(
+                        type="VIOLENCE", input_strength="LOW", output_strength="MEDIUM"
+                    ),
+                    bedrock.CfnGuardrail.ContentFilterConfigProperty(
+                        type="INSULTS", input_strength="MEDIUM", output_strength="MEDIUM"
+                    ),
+                ],
+            ),
+        )
+
+        CfnOutput(self, "GuardrailId",
+            value=self.guardrail.attr_guardrail_id,
+            export_name="WildfireWatch::Safety::GuardrailId",
+            description="Env var: WW_BEDROCK_GUARDRAIL_ID",
+        )
+
+    # ------------------------------------------------------------------
     # Step Functions IAM
     # ------------------------------------------------------------------
 
@@ -104,45 +174,152 @@ class SafetyStack(Stack):
         )
 
     # ------------------------------------------------------------------
-    # Step Functions state machine skeleton (logic wired in #19)
+    # Dispatcher notification Lambda (issue #19)
+    # ------------------------------------------------------------------
+
+    def _provision_dispatcher_notify_lambda(self):
+        self.dispatcher_notify_fn = lambda_.Function(
+            self, "DispatcherNotifyLambda",
+            function_name="wildfire-watch-dispatcher-notify",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="dispatcher_notify.handler",
+            code=lambda_.Code.from_asset("functions/safety"),
+            timeout=Duration.seconds(30),
+            environment={
+                "WW_SNS_ALERT_TOPIC_ARN": "",   # set post-deploy from MessagingStack output
+                "WW_DYNAMODB_FIRES_TABLE": "fires",
+                "WW_CONFIDENCE_THRESHOLD": "0.65",
+            },
+        )
+
+        # Allow publishing to the dispatcher SNS topic.
+        self.dispatcher_notify_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["sns:Publish"],
+            resources=[f"arn:aws:sns:{self.region}:{self.account}:wildfire-watch-*"],
+        ))
+
+        # Allow updating the fires table to store the pending review task token.
+        self.dispatcher_notify_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["dynamodb:UpdateItem"],
+            resources=[f"arn:aws:dynamodb:{self.region}:{self.account}:table/fires"],
+        ))
+
+    # ------------------------------------------------------------------
+    # Step Functions state machine — confidence gate (issue #19)
     # ------------------------------------------------------------------
 
     def _provision_state_machine(self):
-        # Replaced by LambdaInvoke tasks in #19 / #21.
-        safety_gate_placeholder = sfn.Pass(
-            self, "SafetyGatePlaceholder",
-            comment="Replaced by safety gate Lambda in #21",
-            result=sfn.Result.from_object({"action": "APPROVED", "confidence": 1.0}),
+        """Build the full safety workflow state machine.
+
+        Flow (Guardrails run on ALL paths — CLAUDE.md safety rule #2):
+          SafetyGate (LambdaInvoke — runs Bedrock advisory + Guardrails + audit write)
+            → ActionRouter (Choice on $.safety_gate_result.Payload.action)
+                 ├─ APPROVED               → AlertSender
+                 ├─ HUMAN_REVIEW_REQUIRED  → NotifyDispatcherAndWait (WAIT_FOR_TASK_TOKEN, 5-min)
+                 │                              ├─ SendTaskSuccess (approved) → AlertSender
+                 │                              ├─ SendTaskFailure (rejected) → LogAndStop
+                 │                              └─ timeout (5 min, no response) → LogAndStop
+                 └─ BLOCKED / other        → LogAndStop  (no SMS — advisory was unsafe)
+
+        Fail-closed on timeout: CLAUDE.md rule #3 says Step Functions *pauses* for human
+        review on low confidence. A 5-minute timeout without a response means no human
+        approved the alert, so we stop rather than auto-dispatch.
+        """
+
+        # Safety gate Lambda (#21) — the single choke point for every advisory.
+        # Returns: { "action": "APPROVED"|"HUMAN_REVIEW_REQUIRED"|"BLOCKED",
+        #            "prediction_id": str, "advisory": {"sms": str, "brief": str} }
+        # Imported by name so this stack can deploy before #21 is merged to main.
+        safety_gate_fn = lambda_.Function.from_function_name(
+            self, "SafetyGateFn",
+            function_name="wildfire-watch-safety-gate",
         )
 
-        auto_approve = sfn.Pass(
-            self, "AutoApprove",
-            comment="confidence >= 0.65 — proceed to alert sender (wired in #22)",
+        safety_gate = tasks.LambdaInvoke(
+            self, "SafetyGate",
+            lambda_function=safety_gate_fn,
+            payload=sfn.TaskInput.from_object({
+                "fire_event": sfn.JsonPath.string_at("$.fire_event"),
+                "recommendation": sfn.JsonPath.string_at("$.recommendation"),
+            }),
+            result_path="$.safety_gate_result",
         )
 
-        human_review = sfn.Pass(
-            self, "HumanReviewRequired",
-            comment="confidence < 0.65 — pause for dispatcher approval (wired in #19)",
+        # Terminal state — alert sender placeholder until #22 is wired.
+        alert_sender = sfn.Pass(
+            self, "AlertSender",
+            comment="Replaced by alert sender LambdaInvoke in #22",
         )
 
-        # Confidence gate — non-negotiable rule from CLAUDE.md
-        confidence_choice = sfn.Choice(self, "ConfidenceGate") \
+        # Fail-closed terminal state: no SMS dispatched.
+        # Used for: BLOCKED (Guardrails), REJECT (dispatcher), timeout (no response).
+        log_and_stop = sfn.Pass(
+            self, "LogAndStop",
+            comment="No alert dispatched — blocked by Guardrails, rejected by dispatcher, or timed out",
+            parameters={
+                "stopped": True,
+                "fire_event.$": "$.fire_event",
+            },
+        )
+
+        # Human-in-the-loop gate — pauses until sfn:SendTaskSuccess/Failure.
+        # The dispatcher_notify Lambda sends the task token + validated advisory to the
+        # dispatcher via SNS and stores it in DynamoDB so the UI can resume without CLI.
+        notify_and_wait = tasks.LambdaInvoke(
+            self, "NotifyDispatcherAndWait",
+            lambda_function=self.dispatcher_notify_fn,
+            integration_pattern=sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
+            payload=sfn.TaskInput.from_object({
+                "task_token": sfn.JsonPath.task_token,
+                "fire_event": sfn.JsonPath.string_at("$.fire_event"),
+                "recommendation": sfn.JsonPath.string_at("$.recommendation"),
+                # Guardrails-validated advisory — dispatcher sees the exact SMS
+                # text that will go to residents if they approve.
+                "advisory": sfn.JsonPath.string_at("$.safety_gate_result.Payload.advisory"),
+            }),
+            # timeout (not heartbeat): we expect one response, not periodic heartbeats.
+            # After 5 minutes with no SendTaskSuccess/Failure, fail closed.
+            timeout=Duration.minutes(5),
+            result_path="$.approval_result",
+        )
+        # Dispatcher REJECT → log and stop (no alert).
+        notify_and_wait.add_catch(
+            log_and_stop,
+            errors=["States.TaskFailed"],
+            result_path="$.error",
+        )
+        # Timeout with no response → also log and stop (fail closed per CLAUDE.md rule #3).
+        notify_and_wait.add_catch(
+            log_and_stop,
+            errors=["States.Timeout"],
+            result_path="$.error",
+        )
+        notify_and_wait.next(alert_sender)
+
+        # Route on the safety gate's action — three mutually exclusive paths.
+        action_router = sfn.Choice(self, "ActionRouter") \
             .when(
-                sfn.Condition.number_greater_than_equals("$.confidence", 0.65),
-                auto_approve,
+                sfn.Condition.string_equals("$.safety_gate_result.Payload.action", "APPROVED"),
+                alert_sender,
             ) \
-            .otherwise(human_review)
-
-        definition = safety_gate_placeholder.next(confidence_choice)
+            .when(
+                sfn.Condition.string_equals("$.safety_gate_result.Payload.action", "HUMAN_REVIEW_REQUIRED"),
+                notify_and_wait,
+            ) \
+            .otherwise(log_and_stop)  # BLOCKED or any unexpected value → stop
 
         self.state_machine = sfn.StateMachine(
             self, "SafetyStateMachine",
             state_machine_name="wildfire-watch-safety",
-            definition_body=sfn.DefinitionBody.from_chainable(definition),
+            definition_body=sfn.DefinitionBody.from_chainable(safety_gate.next(action_router)),
             role=self.sfn_role,
             timeout=Duration.minutes(15),
-            comment="Safety workflow skeleton — full logic in #19/#21",
+            comment="Safety workflow: Guardrails gate → APPROVED/HUMAN_REVIEW/BLOCKED routing",
         )
+
+        # Allow Step Functions to invoke both Lambdas.
+        safety_gate_fn.grant_invoke(self.sfn_role)
+        self.dispatcher_notify_fn.grant_invoke(self.sfn_role)
 
         CfnOutput(self, "SafetyStateMachineArn",
             value=self.state_machine.state_machine_arn,

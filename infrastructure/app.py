@@ -1,5 +1,6 @@
 import aws_cdk as cdk
 from stacks.core_stack import CoreStack
+from stacks.ml_stack import MLStack
 from stacks.safety_stack import SafetyStack
 from stacks.messaging_stack import MessagingStack
 from stacks.frontend_stack import FrontendStack
@@ -15,6 +16,15 @@ env = cdk.Environment(
 core = CoreStack(app, "WildfireWatchCore",
     env=env,
     description="Wildfire Watch - core data infrastructure (issue #1)",
+)
+
+# MLStack receives core.fire_stream so the SageMaker execution role can be
+# granted Kinesis read access. CDK tracks this as an explicit cross-stack
+# dependency — WildfireWatchML won't deploy until WildfireWatchCore is up.
+MLStack(app, "WildfireWatchML",
+    env=env,
+    fire_stream=core.fire_stream,
+    description="Wildfire Watch - S3 ML bucket, SageMaker role, Glue catalog, Model Registry (issue #2)",
 )
 
 SafetyStack(app, "WildfireWatchSafety",

@@ -7,6 +7,7 @@ from aws_cdk import (
     aws_apigateway as apigw,
     aws_apigatewayv2 as apigwv2,
     aws_amplify as amplify,
+    aws_location as location,
 )
 from constructs import Construct
 
@@ -39,6 +40,7 @@ class FrontendStack(Stack):
         self._provision_rest_api()
         self._provision_websocket_api()
         self._provision_amplify()
+        self._provision_location()
 
     # ------------------------------------------------------------------
     # Cognito — resident + dispatcher pools
@@ -184,4 +186,24 @@ class FrontendStack(Stack):
         CfnOutput(self, "AmplifyAppId",
             value=self.amplify_app.attr_app_id,
             export_name="WildfireWatch::Frontend::AmplifyAppId",
+        )
+
+    # ------------------------------------------------------------------
+    # Location Service - server-side geocoding for resident registration (#23)
+    # ------------------------------------------------------------------
+
+    def _provision_location(self):
+        # Esri data source is fine for the hackathon - free tier covers
+        # demo-scale geocode volume. Switch to Here if we need POI search later.
+        self.place_index = location.CfnPlaceIndex(
+            self, "PlaceIndex",
+            index_name="wildfire-watch-places",
+            data_source="Esri",
+            description="Geocoder for resident registration addresses",
+        )
+
+        CfnOutput(self, "PlaceIndexName",
+            value=self.place_index.index_name,
+            export_name="WildfireWatch::Frontend::PlaceIndexName",
+            description="Env var: WW_LOCATION_PLACE_INDEX",
         )
