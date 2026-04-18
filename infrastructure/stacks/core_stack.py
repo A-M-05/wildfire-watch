@@ -5,7 +5,6 @@ from aws_cdk import (
     Tags,
     aws_kinesis as kinesis,
     aws_dynamodb as dynamodb,
-    aws_timestream as timestream,
     aws_iot as iot,
     aws_events as events,
 )
@@ -25,7 +24,6 @@ class CoreStack(Stack):
 
         self._provision_kinesis()
         self._provision_dynamodb()
-        self._provision_timestream()
         self._provision_iot()
         self._provision_eventbridge()
 
@@ -116,38 +114,6 @@ class CoreStack(Stack):
                 export_name=f"WildfireWatch::Core::{logical_id}",
                 description=f"Env var: {env_var}",
             )
-
-    # ------------------------------------------------------------------
-    # Timestream
-    # ------------------------------------------------------------------
-
-    def _provision_timestream(self):
-        self.ts_database = timestream.CfnDatabase(
-            self, "TimestreamDb",
-            database_name="wildfire-watch",
-        )
-
-        self.ts_table = timestream.CfnTable(
-            self, "TimestreamTable",
-            database_name=self.ts_database.ref,
-            table_name="fire-metrics",
-            retention_properties=timestream.CfnTable.RetentionPropertiesProperty(
-                memory_store_retention_period_in_hours="24",
-                magnetic_store_retention_period_in_days="30",
-            ),
-        )
-        self.ts_table.add_dependency(self.ts_database)
-
-        CfnOutput(self, "TimestreamDbName",
-            value=self.ts_database.ref,
-            export_name="WildfireWatch::Core::TimestreamDbName",
-            description="Env var: WW_TIMESTREAM_DB",
-        )
-        CfnOutput(self, "TimestreamTableName",
-            value=self.ts_table.ref,
-            export_name="WildfireWatch::Core::TimestreamTableName",
-            description="Env var: WW_TIMESTREAM_TABLE",
-        )
 
     # ------------------------------------------------------------------
     # IoT Core
