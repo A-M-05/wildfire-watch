@@ -58,11 +58,10 @@ export default function FireMap() {
     })
   }
 
-  // Fire perimeter fill + outline (for polygons) and circle (for points).
-  // CAL FIRE live data is point-only; mock demo data is polygons. One source,
-  // two layer types filtered by geometry. Color interpolates by containment.
+  // Fire perimeter fill + outline. Polygon footprint is scaled by acres burned
+  // (see api/fires.js). Color interpolates by containment (red→green).
   const addFiresLayer = (map, data) => {
-    for (const id of ['fires-fill', 'fires-outline', 'fires-circle']) {
+    for (const id of ['fires-fill', 'fires-outline']) {
       if (map.getLayer(id)) map.removeLayer(id)
     }
     if (map.getSource('active-fires')) map.removeSource('active-fires')
@@ -90,23 +89,6 @@ export default function FireMap() {
       source: 'active-fires',
       filter: ['==', ['geometry-type'], 'Polygon'],
       paint: { 'line-color': '#000', 'line-width': 1.2, 'line-opacity': 0.4 },
-    }, 'fire-stations-circle')
-    map.addLayer({
-      id: 'fires-circle',
-      type: 'circle',
-      source: 'active-fires',
-      filter: ['==', ['geometry-type'], 'Point'],
-      paint: {
-        'circle-radius': [
-          'interpolate', ['linear'], ['zoom'],
-          5, 6,
-          10, 14,
-        ],
-        'circle-color': containmentColor,
-        'circle-opacity': 0.75,
-        'circle-stroke-width': 2,
-        'circle-stroke-color': '#000',
-      },
     }, 'fire-stations-circle')
   }
 
@@ -194,7 +176,7 @@ export default function FireMap() {
       map.getCanvas().style.cursor = ''
       firePopup.remove()
     }
-    for (const layer of ['fires-fill', 'fires-circle']) {
+    for (const layer of ['fires-fill']) {
       map.on('mouseenter', layer, showFirePopup)
       map.on('mouseleave', layer, hideFirePopup)
     }
