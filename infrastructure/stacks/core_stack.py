@@ -3,10 +3,14 @@ from aws_cdk import (
     RemovalPolicy,
     CfnOutput,
     Tags,
+    Duration,
     aws_kinesis as kinesis,
     aws_dynamodb as dynamodb,
     aws_iot as iot,
     aws_events as events,
+    aws_events_targets as targets,
+    aws_lambda as lambda_,
+    aws_iam as iam,
 )
 from constructs import Construct
 
@@ -26,6 +30,7 @@ class CoreStack(Stack):
         self._provision_dynamodb()
         self._provision_iot()
         self._provision_eventbridge()
+        self._provision_dispatch_lambda()
 
     # ------------------------------------------------------------------
     # Kinesis
@@ -187,4 +192,47 @@ class CoreStack(Stack):
         CfnOutput(self, "FireThresholdRuleArn",
             value=self.fire_threshold_rule.rule_arn,
             export_name="WildfireWatch::Core::FireThresholdRuleArn",
+        )
+
+    # ------------------------------------------------------------------
+    # Dispatch trigger Lambda (issue #10)
+    # ------------------------------------------------------------------
+
+    def _provision_dispatch_lambda(self):
+        # The Lambda evaluates all three OR-thresholds and starts Step Functions.
+        # It receives the full enriched fire event from EventBridge so no extra
+        # DynamoDB reads are needed at dispatch time.
+        self.dispatch_fn = lambda_.Function(
+            self, "DispatchTriggerLambda",
+            function_name="wildfire-watch-dispatch-trigger",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset("functions/dispatch"),
+            timeout=Duration.seconds(30),
+            environment={
+                # WW_STEP_FUNCTIONS_ARN is set post-deploy from SafetyStack output.
+                # Using empty default so synth doesn't fail before safety stack is deployed.
+                "WW_STEP_FUNCTIONS_ARN": "",
+                "WW_RISK_SCORE_TRIGGER": "0.6",
+                "WW_SPREAD_RATE_TRIGGER": "2.0",
+                "WW_POPULATION_TRIGGER": "500",
+            },
+        )
+
+        # Allow this Lambda to start Step Functions executions on any
+        # wildfire-watch state machine (the safety gate machine from #3).
+        self.dispatch_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["states:StartExecution"],
+            resources=[f"arn:aws:states:{self.region}:{self.account}:stateMachine:wildfire-watch-*"],
+        ))
+
+        # Wire the existing EventBridge rule (created in #1) to this Lambda target
+        # and activate it. The rule matches all FireEnriched events — the Lambda
+        # does the threshold check so all three OR-conditions can be evaluated.
+        self.fire_threshold_rule.add_target(targets.LambdaFunction(self.dispatch_fn))
+        self.fire_threshold_rule.node.default_child.enabled = True
+
+        CfnOutput(self, "DispatchTriggerLambdaArn",
+            value=self.dispatch_fn.function_arn,
+            export_name="WildfireWatch::Core::DispatchTriggerLambdaArn",
         )
