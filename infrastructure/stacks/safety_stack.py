@@ -7,6 +7,7 @@ from aws_cdk import (
     aws_dynamodb as dynamodb,
     aws_iam as iam,
     aws_stepfunctions as sfn,
+    aws_bedrock as bedrock,
 )
 from constructs import Construct
 
@@ -40,6 +41,7 @@ class SafetyStack(Stack):
             Tags.of(self).add(k, v)
 
         self._provision_audit_table()
+        self._provision_guardrails()
         self._provision_step_functions_role()
         self._provision_state_machine()
 
@@ -74,6 +76,71 @@ class SafetyStack(Stack):
         CfnOutput(self, "AuditTableStreamArn",
             value=self.audit_table.table_stream_arn,
             export_name="WildfireWatch::Safety::AuditTableStreamArn",
+        )
+
+    # ------------------------------------------------------------------
+    # Bedrock Guardrails — advisory content safety filter (issue #16)
+    # ------------------------------------------------------------------
+
+    def _provision_guardrails(self):
+        # Guardrails is a managed filter between our Bedrock call and the response.
+        # Every advisory passes through it before reaching any Lambda or resident.
+        # Rules here must stay in sync with FALSE_CERTAINTY_PHRASES in guardrails.py.
+        self.guardrail = bedrock.CfnGuardrail(
+            self, "AdvisoryGuardrail",
+            name="wildfire-watch-advisory",
+            description="Blocks false-certainty advisories and strips PII from evacuation alerts",
+            blocked_input_messaging="This input cannot be processed for safety reasons.",
+            blocked_outputs_messaging=(
+                "This advisory has been blocked for safety reasons. "
+                "A human dispatcher will issue guidance shortly."
+            ),
+            # Word policy — block phrases that imply false certainty about resident safety.
+            # These are the phrases most likely to cause harm in a real emergency.
+            word_policy_config=bedrock.CfnGuardrail.WordPolicyConfigProperty(
+                words_config=[
+                    bedrock.CfnGuardrail.WordConfigProperty(text="you are definitely safe"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="you are safe"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="no danger"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="no risk"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="all clear"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="completely safe"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="no threat"),
+                    bedrock.CfnGuardrail.WordConfigProperty(text="nothing to worry"),
+                ],
+            ),
+            # PII policy — anonymize phone numbers, addresses, and names in advisory text.
+            # Residents' contact info must never appear in AI-generated output (CLAUDE.md rule #4).
+            sensitive_information_policy_config=bedrock.CfnGuardrail.SensitiveInformationPolicyConfigProperty(
+                pii_entities_config=[
+                    bedrock.CfnGuardrail.PiiEntityConfigProperty(type="PHONE", action="ANONYMIZE"),
+                    bedrock.CfnGuardrail.PiiEntityConfigProperty(type="ADDRESS", action="ANONYMIZE"),
+                    bedrock.CfnGuardrail.PiiEntityConfigProperty(type="NAME", action="ANONYMIZE"),
+                    bedrock.CfnGuardrail.PiiEntityConfigProperty(type="EMAIL", action="ANONYMIZE"),
+                ],
+            ),
+            # Content filters — block hate/violence at MEDIUM strength.
+            # MEDIUM catches explicit content without over-blocking legitimate
+            # emergency language like "fire is threatening" or "danger zone".
+            content_policy_config=bedrock.CfnGuardrail.ContentPolicyConfigProperty(
+                filters_config=[
+                    bedrock.CfnGuardrail.ContentFilterConfigProperty(
+                        type="HATE", input_strength="MEDIUM", output_strength="MEDIUM"
+                    ),
+                    bedrock.CfnGuardrail.ContentFilterConfigProperty(
+                        type="VIOLENCE", input_strength="LOW", output_strength="MEDIUM"
+                    ),
+                    bedrock.CfnGuardrail.ContentFilterConfigProperty(
+                        type="INSULTS", input_strength="MEDIUM", output_strength="MEDIUM"
+                    ),
+                ],
+            ),
+        )
+
+        CfnOutput(self, "GuardrailId",
+            value=self.guardrail.attr_guardrail_id,
+            export_name="WildfireWatch::Safety::GuardrailId",
+            description="Env var: WW_BEDROCK_GUARDRAIL_ID",
         )
 
     # ------------------------------------------------------------------
