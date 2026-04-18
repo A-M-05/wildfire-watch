@@ -8,6 +8,14 @@ chain (see ``verify_chain``).
 Hard rule: callers must complete the ``put_item`` before any downstream
 action (SMS publish, Step Functions transition). If the write raises,
 halt — do not proceed to alerting.
+
+Trust model: ``verify_chain`` detects mutation, deletion of a middle row,
+and inserted rows whose ``prev_hash`` is fabricated. It does NOT detect
+deletion of the most recent row, or a fully cascaded rewrite by an
+adversary with table write access — both require an external anchor
+(e.g. periodic snapshot of the latest ``record_hash`` off-system). Out of
+scope for the hackathon; the contract test (#32) anchors against a known
+good post-condition instead.
 """
 
 import hashlib
@@ -132,18 +140,29 @@ def mark_alert_sent(fire_id: str, prediction_id: str, alert_id: str) -> str:
 
 
 def verify_chain(fire_id: str) -> bool:
-    """Replay the chain for a fire; return False on any broken link or tamper."""
-    resp = _table().query(
-        IndexName="fire_id-written_at-index",
-        KeyConditionExpression=Key("fire_id").eq(fire_id),
-        ScanIndexForward=True,
-    )
+    """Replay the chain for a fire; return False on any broken link or tamper.
+
+    Paginates the GSI query — a chain spanning multiple 1MB pages must be
+    fully replayed or a partial replay would falsely return True.
+    """
     expected_prev = GENESIS_HASH
-    for item in resp.get("Items", []):
-        if item.get("prev_hash") != expected_prev:
-            return False
-        recomputed = _canonical_hash({k: v for k, v in item.items() if k != "record_hash"})
-        if recomputed != item.get("record_hash"):
-            return False
-        expected_prev = item["record_hash"]
-    return True
+    last_key = None
+    while True:
+        kwargs = {
+            "IndexName": "fire_id-written_at-index",
+            "KeyConditionExpression": Key("fire_id").eq(fire_id),
+            "ScanIndexForward": True,
+        }
+        if last_key:
+            kwargs["ExclusiveStartKey"] = last_key
+        resp = _table().query(**kwargs)
+        for item in resp.get("Items", []):
+            if item.get("prev_hash") != expected_prev:
+                return False
+            recomputed = _canonical_hash({k: v for k, v in item.items() if k != "record_hash"})
+            if recomputed != item.get("record_hash"):
+                return False
+            expected_prev = item["record_hash"]
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            return True

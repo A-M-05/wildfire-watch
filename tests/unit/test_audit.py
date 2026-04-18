@@ -66,6 +66,11 @@ def test_chain_links_across_events(audit):
     pid = audit.log_prediction("fire-2", *_rec())
     audit.append_guardrail_outcome("fire-2", pid, passed=True, reason=None)
     audit.mark_alert_sent("fire-2", pid, alert_id="alert-xyz")
+    table = boto3.resource("dynamodb", region_name="us-west-2").Table(TABLE)
+    rows = [i for i in table.scan()["Items"] if i["fire_id"] == "fire-2"]
+    assert len(rows) == 3
+    events = sorted(r["event"] for r in rows)
+    assert events == ["alert_sent", "guardrails_outcome", "prediction"]
     assert audit.verify_chain("fire-2") is True
 
 
@@ -111,3 +116,44 @@ def test_verify_chain_detects_broken_prev_hash(audit):
 
 def test_empty_fire_chain_is_valid(audit):
     assert audit.verify_chain("nonexistent-fire") is True
+
+
+def test_verify_chain_detects_deleted_middle_row(audit):
+    # Three rows, then yank the middle one. The third row's prev_hash now
+    # points at a record that no longer appears in the replay -> mismatch.
+    pid = audit.log_prediction("fire-5", *_rec())
+    middle = audit.append_guardrail_outcome("fire-5", pid, passed=True, reason=None)
+    audit.mark_alert_sent("fire-5", pid, alert_id="alert-mid")
+    assert audit.verify_chain("fire-5") is True
+
+    table = boto3.resource("dynamodb", region_name="us-west-2").Table(TABLE)
+    target = next(i for i in table.scan()["Items"] if i["prediction_id"] == middle)
+    table.delete_item(Key={"prediction_id": target["prediction_id"], "written_at": target["written_at"]})
+
+    assert audit.verify_chain("fire-5") is False
+
+
+def test_verify_chain_detects_linked_prediction_id_tampering(audit):
+    # Proves the link between a guardrails-outcome row and its prediction
+    # is part of the integrity guarantee, not just an unprotected reference.
+    pid = audit.log_prediction("fire-6", *_rec())
+    outcome = audit.append_guardrail_outcome("fire-6", pid, passed=True, reason=None)
+
+    table = boto3.resource("dynamodb", region_name="us-west-2").Table(TABLE)
+    target = next(i for i in table.scan()["Items"] if i["prediction_id"] == outcome)
+    table.update_item(
+        Key={"prediction_id": target["prediction_id"], "written_at": target["written_at"]},
+        UpdateExpression="SET linked_prediction_id = :p",
+        ExpressionAttributeValues={":p": "fabricated-prediction-id"},
+    )
+
+    assert audit.verify_chain("fire-6") is False
+
+
+def test_verify_chain_replays_long_chain(audit):
+    # Guards against future pagination regressions: if verify_chain stops
+    # iterating after the first page, this test is the smoke alarm.
+    pid = audit.log_prediction("fire-long", *_rec())
+    for _ in range(60):
+        audit.append_guardrail_outcome("fire-long", pid, passed=True, reason=None)
+    assert audit.verify_chain("fire-long") is True
