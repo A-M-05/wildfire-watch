@@ -226,7 +226,10 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       firesRef.current = fires
       zonesRef.current = zones
       if (onFiresLoaded) onFiresLoaded(fires)
-      if (map.isStyleLoaded()) {
+      // Style may report not-loaded mid-flight (Mapbox quirk after addLayer
+      // calls). Defer the paint to the next idle tick rather than dropping
+      // the data — otherwise fires only appear on the second 30s refresh.
+      const applyFires = () => {
         const fireSrc = map.getSource('active-fires')
         if (fireSrc) fireSrc.setData(fires)
         else addFiresLayer(map, fires)
@@ -234,6 +237,8 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
         if (zoneSrc) zoneSrc.setData(zones)
         else addAlertZonesLayer(map, zones)
       }
+      if (map.isStyleLoaded()) applyFires()
+      else map.once('idle', applyFires)
 
       // Evac routes are async per fire and shouldn't block the fires render.
       // Fire-and-forget; layer updates as soon as routes resolve.
