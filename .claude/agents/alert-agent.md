@@ -7,7 +7,7 @@
 
 - Send SMS alerts to registered residents via `sns.publish(PhoneNumber=...)`, filtered by GPS radius in this Lambda (Pinpoint is unavailable on this account — SCP blocks `mobiletargeting:CreateApp`)
 - Build the resident registration flow (Cognito + DynamoDB + location)
-- Send watershed contamination alerts via Comprehend + Bedrock + SNS
+- Send watershed/reservoir water-level evacuation alerts via USGS + Bedrock + SNS
 
 ## File layout
 
@@ -15,7 +15,7 @@
 functions/alert/
 ├── sender.py              ← Issue #22: Pinpoint SMS sender
 ├── register.py            ← Issue #23: resident registration handler
-├── watershed_alert.py     ← Issue #24: watershed contamination alert
+├── watershed_alert.py     ← Issue #24: watershed/reservoir water-level evacuation alert
 └── requirements.txt
 ```
 
@@ -83,17 +83,19 @@ def register(event, context):
     )
 ```
 
-## Issue #24 — Watershed contamination alert
+## Issue #24 — Watershed/reservoir water-level evacuation alert
 
-Triggered when USGS detects elevated turbidity or flow anomaly near a fire perimeter.
+Triggered when USGS detects anomalous gauge height, discharge, or reservoir storage change on a watershed/reservoir near an active fire — signals downstream evacuation risk (dam stress, reservoir drawdown for firefighting, post-burn flood potential).
 
 Flow:
-1. USGS poller detects anomaly at a monitoring site
-2. Pull EPA TRI data for chemical sites within 10km of that site
-3. Feed to Comprehend to extract threat entities from news/scanner feeds
-4. Generate advisory via Bedrock (same prompt template, different context)
+1. USGS water-services poller reads gauge height (`00065`), discharge (`00060`), reservoir storage (`00054`) for sites near active fires
+2. Level/flow anomaly detector flags drops/spikes outside historical baseline
+3. Identify downstream threatened areas + population at risk
+4. Generate advisory via Bedrock (threatened areas + evacuation guidance)
 5. Pass through safety gate (#21)
-6. Send to residents downstream of the watershed via `sns.publish(PhoneNumber=...)`
+6. Send to residents in threatened zones via `sns.publish(PhoneNumber=...)`
+
+The earlier contamination-risk variant (EPA TRI + Comprehend) is backlogged — levels/flow give a direct evacuation signal aligned with the 60-second fire-to-SMS demo.
 
 ## Verification
 

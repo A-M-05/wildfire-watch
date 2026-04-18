@@ -5,7 +5,7 @@ Read this file at the start of every session.
 ## What we're building
 
 A real-time wildfire resource dispatch and community alert system. Two hackathon tracks:
-- **Environmental** — live fire + watershed contamination monitoring
+- **Environmental** — live fire + watershed/reservoir water-level monitoring for evacuation prediction
 - **AI Safety** — every AI recommendation is audited, validated, and gated before reaching people
 
 **Demo target:** Fire detected → resources dispatched → resident SMS in under 60 seconds.
