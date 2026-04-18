@@ -124,10 +124,13 @@ def test_threshold_overridable_via_env(gate, mocks, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_log_prediction_called_before_validate(gate, mocks):
-    # The hard rule from CLAUDE.md: audit row before any safety-relevant
-    # downstream action. validate_advisory IS safety-relevant.
+def test_strict_call_order(gate, mocks):
+    # Full chain: generate FIRST (otherwise we'd audit empty data),
+    # then log, then validate, then outcome. Reordering breaks #32.
     order = []
+    mocks.generate.side_effect = lambda *a, **kw: order.append("generate") or {
+        "sms": "Evacuate east.", "brief": "b"
+    }
     mocks.log.side_effect = lambda *a, **kw: order.append("log") or "pred-123"
     mocks.validate.side_effect = lambda *a, **kw: order.append("validate") or {
         "passed": True, "blocked_reason": None
@@ -135,7 +138,7 @@ def test_log_prediction_called_before_validate(gate, mocks):
     mocks.outcome.side_effect = lambda *a, **kw: order.append("outcome") or "out-1"
 
     gate.handler(_event(confidence=0.9))
-    assert order == ["log", "validate", "outcome"]
+    assert order == ["generate", "log", "validate", "outcome"]
 
 
 def test_outcome_row_links_to_prediction_id(gate, mocks):
@@ -185,3 +188,77 @@ def test_guardrails_validation_called_with_sms_and_confidence(gate, mocks):
     # confidence (so guardrails' in-process certainty check can run).
     gate.handler(_event(confidence=0.42))
     mocks.validate.assert_called_once_with("Evacuate east.", confidence=0.42)
+
+
+# ---------------------------------------------------------------------------
+# Forensic completeness - the audit chain must explain what happened
+# ---------------------------------------------------------------------------
+
+
+def test_validate_advisory_failure_writes_error_outcome_then_raises(gate, mocks):
+    # Bedrock outage during validation. Without a forensic outcome row, the
+    # audit chain has an unexplained orphan prediction; Step Functions retries
+    # would pile up more orphans. We append an outcome row before re-raising.
+    mocks.validate.side_effect = RuntimeError("Bedrock 503")
+    with pytest.raises(RuntimeError, match="Bedrock 503"):
+        gate.handler(_event(confidence=0.9))
+
+    mocks.log.assert_called_once()
+    mocks.outcome.assert_called_once()
+    args, kwargs = mocks.outcome.call_args
+    assert args == ("fire-001", "pred-123")
+    assert kwargs["passed"] is False
+    assert "guardrails service error" in kwargs["reason"]
+    assert "RuntimeError" in kwargs["reason"]
+
+
+def test_outcome_row_failure_propagates(gate, mocks):
+    # Rare but possible (DynamoDB throttle). Propagation is correct because
+    # the Lambda has no clean way to roll back the prediction row.
+    mocks.outcome.side_effect = RuntimeError("DDB throttle")
+    with pytest.raises(RuntimeError, match="DDB throttle"):
+        gate.handler(_event(confidence=0.9))
+
+
+# ---------------------------------------------------------------------------
+# Input validation - structured errors instead of opaque KeyErrors
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("event,missing", [
+    ({}, "fire_event"),
+    ({"recommendation": {"confidence": 0.9}}, "fire_event"),
+    ({"fire_event": {"fire_id": "f1"}}, "recommendation"),
+    ({"fire_event": {}, "recommendation": {"confidence": 0.9}}, "fire_id"),
+    ({"fire_event": {"fire_id": "f1"}, "recommendation": {}}, "confidence"),
+])
+def test_missing_required_fields_raise_value_error(gate, mocks, event, missing):
+    with pytest.raises(ValueError, match=missing):
+        gate.handler(event)
+    mocks.generate.assert_not_called()
+    mocks.log.assert_not_called()
+
+
+def test_non_dict_event_raises_value_error(gate, mocks):
+    for bad in [None, "string", 42, [1, 2]]:
+        with pytest.raises(ValueError, match="JSON object"):
+            gate.handler(bad)
+
+
+def test_malformed_advisory_raises_before_audit_row(gate, mocks):
+    # If Bedrock returns a string instead of {"sms": ..., "brief": ...},
+    # we must catch it BEFORE writing the prediction row - otherwise the
+    # chain has an orphan with no recoverable advisory text.
+    mocks.generate.return_value = "not a dict"
+    with pytest.raises(ValueError, match="sms"):
+        gate.handler(_event(confidence=0.9))
+    mocks.log.assert_not_called()
+    mocks.outcome.assert_not_called()
+
+
+def test_advisory_dict_missing_sms_raises_before_audit_row(gate, mocks):
+    mocks.generate.return_value = {"brief": "no sms here"}
+    with pytest.raises(ValueError, match="sms"):
+        gate.handler(_event(confidence=0.9))
+    mocks.log.assert_not_called()
+    mocks.outcome.assert_not_called()
