@@ -79,6 +79,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
   const routesRef = useRef(null)
   const destsRef = useRef(null)
   const reservoirsRef = useRef(null)
+  const popupRef = useRef(null)
   const didInitTheme = useRef(false)
   const [error, setError] = useState(null)
   const setTheme = (next) => {
@@ -467,7 +468,10 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
 
     // Single shared popup — keeps "only one popup at a time" trivial. Each
     // click handler swaps content + position; the empty-space click closes it.
+    // className is themed via popupRef so the basemap-theme effect can flip it.
     const popup = new mapboxgl.Popup({ closeButton: true, closeOnClick: false, offset: 10 })
+    popupRef.current = popup
+    if (theme === 'dark') popup.addClassName('ww-popup-dark')
 
     // Hover state per layer — drives the feature-state-based paint expressions
     // (radius pop on circles, opacity bump on fills) so you can *see* what's
@@ -682,6 +686,10 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     if (!map) return
 
     map.setStyle(STYLES[theme])
+    if (popupRef.current) {
+      if (theme === 'dark') popupRef.current.addClassName('ww-popup-dark')
+      else popupRef.current.removeClassName('ww-popup-dark')
+    }
     map.once('style.load', () => {
       if (stationsRef.current) addStationsLayer(map, stationsRef.current)
       if (reservoirsRef.current) addReservoirsLayer(map, reservoirsRef.current)
