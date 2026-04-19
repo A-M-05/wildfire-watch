@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { fetchActiveFires, buildAlertZones } from './api/fires'
 import { buildEvacRoutes, routeSummaryForFire, RED_CROSS_SHELTERS_LIST } from './api/evacRoutes'
 import { fetchDispatchData } from './api/dispatch'
-import { nearestReservoir, loadReservoirs, droughtSeverity } from './api/reservoirs'
+import { nearestReservoir } from './api/reservoirs'
 import { useFireWebSocket } from './api/websocket'
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN
@@ -79,7 +79,6 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
   const zonesRef = useRef(null)
   const routesRef = useRef(null)
   const destsRef = useRef(null)
-  const reservoirsRef = useRef(null)
   const popupRef = useRef(null)
   const didInitTheme = useRef(false)
   const [error, setError] = useState(null)
@@ -119,32 +118,6 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
           'case', ['boolean', ['feature-state', 'hover'], false], 8.5, 7,
         ],
         'circle-color': '#22cc44',
-        'circle-stroke-width': [
-          'case', ['boolean', ['feature-state', 'hover'], false], 2.5, 1.5,
-        ],
-        'circle-stroke-color': '#ffffff',
-        'circle-radius-transition': { duration: 320 },
-        'circle-stroke-width-transition': { duration: 320 },
-      },
-    })
-  }
-
-  // Reservoir dots — a separate circle layer so the dispatcher can see *where*
-  // the closest water source is, not just its name in the popup. Color is fixed
-  // blue (the chip in the click popup carries the drought severity color).
-  const addReservoirsLayer = (map, data) => {
-    if (map.getLayer('reservoirs-circle')) map.removeLayer('reservoirs-circle')
-    if (map.getSource('reservoirs')) map.removeSource('reservoirs')
-    map.addSource('reservoirs', { type: 'geojson', data, generateId: true })
-    map.addLayer({
-      id: 'reservoirs-circle',
-      type: 'circle',
-      source: 'reservoirs',
-      paint: {
-        'circle-radius': [
-          'case', ['boolean', ['feature-state', 'hover'], false], 9.5, 8,
-        ],
-        'circle-color': '#1e88e5',
         'circle-stroke-width': [
           'case', ['boolean', ['feature-state', 'hover'], false], 2.5, 1.5,
         ],
@@ -521,28 +494,6 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       } catch (e) {
         setError(`station load failed: ${e.message}`)
       }
-      // Reservoirs are best-effort — if the snapshot is missing the rest of
-      // the map should still work. Conversion to a FeatureCollection happens
-      // here (not in api/reservoirs.js) so that module stays focused on the
-      // nearest-fire lookup the dispatcher panel uses.
-      try {
-        const reservoirs = await loadReservoirs()
-        const data = {
-          type: 'FeatureCollection',
-          features: reservoirs.map((r) => ({
-            type: 'Feature',
-            geometry: { type: 'Point', coordinates: [r.lon, r.lat] },
-            properties: {
-              ...r,
-              drought_severity: droughtSeverity(r.pct_capacity),
-            },
-          })),
-        }
-        reservoirsRef.current = data
-        addReservoirsLayer(map, data)
-      } catch (e) {
-        console.warn('reservoir layer skipped:', e.message)
-      }
       addRedCrossLayer(map)
       addDispatchTethersLayer(map)
       await refreshFires(map)
@@ -559,7 +510,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
 
     // Hover state per layer — drives the feature-state-based paint expressions
     // (radius pop on circles, opacity bump on fills) so you can *see* what's
-    // under the cursor. Tracked per layer so a fire under a reservoir doesn't
+    // under the cursor. Tracked per layer so a fire under a station dot doesn't
     // leave the fire stuck in hover when the cursor moves to the dot.
     const hovered = { /* layer → { source, id } */ }
     const setHover = (layer, sourceId, featureId) => {
@@ -580,7 +531,6 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       { layer: 'fires-fill',          source: 'active-fires' },
       { layer: 'alert-zones-fill',    source: 'alert-zones' },
       { layer: 'fire-stations-circle', source: 'fire-stations' },
-      { layer: 'reservoirs-circle',   source: 'reservoirs' },
     ]
     for (const { layer, source } of HOVER_LAYERS) {
       map.on('mousemove', layer, (e) => {
@@ -652,13 +602,6 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       `Units: ${p.units}`
     )
 
-    const reservoirPopupHTML = (p) => (
-      `<strong>${p.name}</strong><br/>` +
-      `<span style="color:#666;font-size:11px">CDEC ${p.station} · ` +
-      `${Number(p.storage_af).toLocaleString()} of ${Number(p.gross_pool_af).toLocaleString()} AF</span><br/>` +
-      `<div style="margin-top:6px">${reservoirChipHTML(p)}</div>`
-    )
-
     // Click handlers — each marks the original event so the empty-space click
     // listener below can tell "click hit a layer" from "click hit nothing."
     map.on('click', 'fire-stations-circle', (e) => {
@@ -669,22 +612,14 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       popup.setLngLat(f.geometry.coordinates).setHTML(stationPopupHTML(f.properties)).addTo(map)
     })
 
-    map.on('click', 'reservoirs-circle', (e) => {
-      const f = e.features[0]
-      if (!f) return
-      e.originalEvent.__layerClick = true
-      popup._ww_fireId = null
-      popup.setLngLat(f.geometry.coordinates).setHTML(reservoirPopupHTML(f.properties)).addTo(map)
-    })
-
     map.on('click', 'alert-zones-fill', (e) => {
-      // The halo overlaps both the fire footprint AND any reservoir/station
+      // The halo overlaps both the fire footprint AND any station/shelter
       // dots inside the alert radius. Mapbox fires every layer's click handler
       // independently, so without this deferral the dot popup briefly opens
       // and is then overwritten by the halo popup — the user sees the halo
       // "winning" even when they clicked the (enlarged-on-hover) dot.
       const blockingHit = map.queryRenderedFeatures(e.point, {
-        layers: ['fires-fill', 'reservoirs-circle', 'fire-stations-circle', 'red-cross-anchor'],
+        layers: ['fires-fill', 'fire-stations-circle', 'red-cross-anchor'],
       })
       if (blockingHit.length) return
       const f = e.features[0]
@@ -717,11 +652,11 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     // selection (existing behavior) AND opens the fire popup. Single click,
     // single popup, panel updates in lockstep.
     map.on('click', 'fires-fill', (e) => {
-      // Reservoir / station dots can sit inside a fire footprint — defer to
-      // them so the user can actually click a reservoir under a fire without
-      // the fire layer hijacking the click.
+      // Station / shelter dots can sit inside a fire footprint — defer to
+      // them so the user can actually click a dot under a fire without the
+      // fire layer hijacking the click.
       const pointHit = map.queryRenderedFeatures(e.point, {
-        layers: ['reservoirs-circle', 'fire-stations-circle', 'red-cross-anchor'],
+        layers: ['fire-stations-circle', 'red-cross-anchor'],
       })
       if (pointHit.length) return
       const f = e.features[0]
@@ -852,7 +787,6 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     }
     map.once('style.load', () => {
       if (stationsRef.current) addStationsLayer(map, stationsRef.current)
-      if (reservoirsRef.current) addReservoirsLayer(map, reservoirsRef.current)
       addRedCrossLayer(map)
       addDispatchTethersLayer(map)
       if (firesRef.current) addFiresLayer(map, firesRef.current)
