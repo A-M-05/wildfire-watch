@@ -1,3 +1,5 @@
+import os
+
 from aws_cdk import (
     Stack,
     RemovalPolicy,
@@ -15,6 +17,10 @@ from aws_cdk import (
 from constructs import Construct
 
 TAGS = {"Project": "wildfire-watch", "Env": "hackathon"}
+
+_FUNCTIONS_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "functions")
+)
 
 
 class CoreStack(Stack):
@@ -207,7 +213,7 @@ class CoreStack(Stack):
             function_name="wildfire-watch-dispatch-trigger",
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="handler.handler",
-            code=lambda_.Code.from_asset("functions/dispatch"),
+            code=lambda_.Code.from_asset(os.path.join(_FUNCTIONS_DIR, "dispatch")),
             timeout=Duration.seconds(30),
             environment={
                 # WW_STEP_FUNCTIONS_ARN is set post-deploy from SafetyStack output.
