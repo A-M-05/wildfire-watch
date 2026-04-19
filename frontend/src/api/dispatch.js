@@ -54,6 +54,13 @@ function fakeAdvisory(fire) {
   const acres = p.acres_burned ?? 0
   const contained = p.containment_pct ?? 0
   const name = p.name || 'this incident'
+  if (contained >= 100) {
+    return (
+      `${name} is fully contained. No active evacuation in effect; mop-up crews ` +
+      `remain on scene through the cold-trail check, then standby resources are ` +
+      `released. Air monitoring continues for 24h.`
+    )
+  }
   if (contained >= 70) {
     return (
       `Mop-up phase recommended for ${name}. Maintain perimeter watch with current ` +

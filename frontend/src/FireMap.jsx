@@ -540,12 +540,18 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
             route.destination_pet_friendly ? '🐾 pets OK' : null,
           ].filter(Boolean).join(' · ')
         : ''
-      const evacLine = route
-        ? `Evac route: <strong>${destLabel}</strong> — ` +
+      let evacLine
+      if (route?.contained) {
+        evacLine = `<span style="color:#1f9d55;font-weight:600">✓ Fully contained — no evac in effect</span>`
+      } else if (route) {
+        evacLine =
+          `Evac route: <strong>${destLabel}</strong> — ` +
           `${route.distance_km.toFixed(0)} km · ${Math.round(route.duration_min)} min<br/>` +
           (shelterMeta ? `<span style="color:#444;font-size:12px">${shelterMeta}</span><br/>` : '') +
           `<span style="color:#444;font-size:12px">${trafficLabel} (live)</span>`
-        : `Evac route: computing…`
+      } else {
+        evacLine = `Evac route: computing…`
+      }
       return (
         `<strong>Alert zone — ${p.name || 'fire'}</strong><br/>` +
         `Radius: ${Number(p.alert_radius_km).toFixed(1)} km<br/>` +

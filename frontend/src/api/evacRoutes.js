@@ -222,6 +222,15 @@ async function fetchOneRoute(fire, openShelters) {
   const cached = routeCache.get(fireId)
   if (cached && Date.now() - cached._cachedAt < CACHE_TTL_MS) return cached
 
+  // Fully-contained fires don't need an evac route — drawing one would imply
+  // an active threat that no longer exists. Cache a contained sentinel so
+  // routeSummaryForFire can surface a status badge instead of the route line.
+  const containment = Number(fire.properties?.containment_pct ?? 0)
+  if (containment >= 100) {
+    routeCache.set(fireId, { _cachedAt: Date.now(), _contained: true })
+    return null
+  }
+
   const dest = pickDestination(fire, openShelters)
   if (!dest) return null
 
@@ -294,6 +303,7 @@ export async function buildEvacRoutes(fireCollection) {
 export function routeSummaryForFire(fireId) {
   const r = routeCache.get(fireId)
   if (!r) return null
+  if (r._contained) return { contained: true }
   return {
     destination: r.properties.destination_name,
     destination_type: r.properties.destination_type,
