@@ -236,19 +236,15 @@ export default function DispatchPanel({ fire, onClose, theme = 'light' }) {
         <DispatcherView fire={fire} data={data} t={t} />
       )}
 
-      <footer style={{
-        padding: '10px 16px', fontSize: 10, color: t.textVeryDim,
-        textAlign: 'center', letterSpacing: 0.3,
-      }}>
-        Stub data — wire to DynamoDB + WebSocket in #30
-      </footer>
     </aside>
   )
 }
 
 function ResidentView({ fire, data, t }) {
   const p = fire.properties
-  const tone = data ? safetyTone(data.confidence) : null
+  // Real model confidence from #105 wins; dispatch stub is the fallback.
+  const confidence = p.confidence ?? data?.confidence ?? null
+  const tone = confidence != null ? safetyTone(confidence) : null
   const { coords, status, error, request } = useUserLocation()
 
   const distance = coords && p.centroid ? haversineKm(coords, p.centroid) : null
@@ -344,7 +340,7 @@ function ResidentView({ fire, data, t }) {
           <Section t={t} title="Alert status">
             <Badge color={tone.color}>{tone.label}</Badge>
             <GateNote t={t} tone={tone} />
-            {data.confidence >= 0.65 && (
+            {confidence >= 0.65 && (
               <div style={{ marginTop: 8 }}>
                 <KV t={t} k="Residents notified" v={data.alerts_sent.toLocaleString()} />
                 <KV t={t} k="Sent" v={timeAgo(data.alert_sent_at)} />
@@ -371,7 +367,11 @@ function ResidentView({ fire, data, t }) {
 
 function DispatcherView({ fire, data, t }) {
   const p = fire.properties
-  const tone = data ? dispatcherTone(data.confidence) : null
+  // Real model confidence from #105's enriched fixture / live /fires endpoint
+  // wins over the dispatch-stub's synthesized one. Falls back to the stub
+  // when the upstream record doesn't carry a confidence field.
+  const confidence = p.confidence ?? data?.confidence ?? null
+  const tone = confidence != null ? dispatcherTone(confidence) : null
   return (
     <>
       <Section t={t} title="Incident">
@@ -381,12 +381,21 @@ function DispatcherView({ fire, data, t }) {
         {p.spread_rate_km2_per_hr ? (
           <KV t={t} k="Spread rate" v={`${p.spread_rate_km2_per_hr} km²/hr`} />
         ) : null}
+        {p.population_at_risk != null ? (
+          <KV t={t} k="Population at risk" v={Number(p.population_at_risk).toLocaleString()} />
+        ) : null}
+        {p.alert_radius_km != null ? (
+          <KV t={t} k="Alert radius" v={`${Number(p.alert_radius_km).toFixed(1)} km`} />
+        ) : null}
+        {p.risk_score != null ? (
+          <KV t={t} k="Risk score" v={Number(p.risk_score).toFixed(2)} />
+        ) : null}
       </Section>
 
       {data && (
         <>
           <Section t={t} title="AI Advisory">
-            <Badge color={tone.color}>{tone.label} · {(data.confidence * 100).toFixed(0)}%</Badge>
+            <Badge color={tone.color}>{tone.label} · {(confidence * 100).toFixed(0)}%</Badge>
             <GateNote t={t} tone={tone} />
             <p style={{ margin: '10px 0 0', fontSize: 13, lineHeight: 1.5, color: t.textPrimary }}>
               {data.advisory}
