@@ -1,3 +1,5 @@
+import os
+
 from aws_cdk import (
     Stack,
     RemovalPolicy,
@@ -18,6 +20,10 @@ TAGS = {"Project": "wildfire-watch", "Env": "hackathon"}
 _FUNCTIONS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "functions"))
 
 AUDIT_TABLE_NAME = "wildfire-watch-audit"
+
+_FUNCTIONS_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "functions")
+)
 
 
 class SafetyStack(Stack):

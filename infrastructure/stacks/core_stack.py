@@ -1,3 +1,5 @@
+import os
+
 from aws_cdk import (
     Stack,
     RemovalPolicy,
@@ -17,6 +19,10 @@ import os
 
 TAGS = {"Project": "wildfire-watch", "Env": "hackathon"}
 _FUNCTIONS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "functions"))
+
+_FUNCTIONS_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "functions")
+)
 
 
 class CoreStack(Stack):
