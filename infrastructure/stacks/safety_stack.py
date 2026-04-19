@@ -12,8 +12,10 @@ from aws_cdk import (
     aws_bedrock as bedrock,
 )
 from constructs import Construct
+import os
 
 TAGS = {"Project": "wildfire-watch", "Env": "hackathon"}
+_FUNCTIONS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "functions"))
 
 AUDIT_TABLE_NAME = "wildfire-watch-audit"
 
@@ -183,7 +185,7 @@ class SafetyStack(Stack):
             function_name="wildfire-watch-dispatcher-notify",
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="dispatcher_notify.handler",
-            code=lambda_.Code.from_asset("functions/safety"),
+            code=lambda_.Code.from_asset(os.path.join(_FUNCTIONS_DIR, "safety")),
             timeout=Duration.seconds(30),
             environment={
                 "WW_SNS_ALERT_TOPIC_ARN": "",   # set post-deploy from MessagingStack output

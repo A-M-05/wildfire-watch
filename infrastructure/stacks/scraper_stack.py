@@ -15,9 +15,8 @@ from aws_cdk import (
 )
 from constructs import Construct
 
-# Pre-built asset dir — populated by scripts/build_scraper.sh before cdk deploy
 _SCRAPER_BUILD = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../functions/scraper/build")
+    os.path.join(os.path.dirname(__file__), "../../functions/scraper")
 )
 
 

@@ -19,7 +19,7 @@ from aws_cdk import (
 from constructs import Construct
 
 _FUNCTIONS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "functions"))
-_ENRICH_BUILD = os.path.join(_FUNCTIONS_DIR, "enrich", "build")
+_ENRICH_BUILD = os.path.join(_FUNCTIONS_DIR, "enrich")
 
 
 class PipelineStack(Stack):
