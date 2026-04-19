@@ -523,6 +523,13 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     // selection (existing behavior) AND opens the fire popup. Single click,
     // single popup, panel updates in lockstep.
     map.on('click', 'fires-fill', (e) => {
+      // Reservoir / station dots can sit inside a fire footprint — defer to
+      // them so the user can actually click a reservoir under a fire without
+      // the fire layer hijacking the click.
+      const pointHit = map.queryRenderedFeatures(e.point, {
+        layers: ['reservoirs-circle', 'fire-stations-circle'],
+      })
+      if (pointHit.length) return
       const f = e.features[0]
       if (!f?.properties?.fire_id) return
       e.originalEvent.__fireClick = true
