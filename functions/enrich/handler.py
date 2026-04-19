@@ -287,6 +287,108 @@ def get_dispatch_recommendation(fire_event: dict) -> dict:
 
 
 # ------------------------------------------------------------------
+# Predicted fire perimeter — wind-driven ellipse from Rothermel/SageMaker
+# spread rate. Anderson 1983 / Andrews 2018 length-to-breadth + head-to-back.
+#
+# Inputs are scalars from the model + NOAA wind. Output is a GeoJSON Polygon
+# ring suitable for `perimeter_geojson`. Existing CAL FIRE polygons take
+# priority — see enrich_fire() guard.
+# ------------------------------------------------------------------
+
+_ELLIPSE_VERTICES = 32   # 32 reads as a smooth oval at typical zooms
+_ELLIPSE_T_MIN_HR = 0.5  # floor: even brand-new fires get a visible footprint
+_ELLIPSE_T_MAX_HR = 24.0 # ceiling: stale fires shouldn't grow without bound
+_DEG_LAT_KM = 111.0      # degrees-per-km for equirectangular projection
+
+
+def _length_to_breadth(wind_mph: float) -> float:
+    """Anderson 1983 fire-shape ratio. Calm wind → near-circular, strong wind → cigar."""
+    u = max(0.0, wind_mph)
+    lb = 0.936 * math.exp(0.2566 * u) + 0.461 * math.exp(-0.1548 * u) - 0.397
+    # Clamp: LB < 1 is unphysical, LB > 8 produces visually broken shapes.
+    return max(1.0, min(lb, 8.0))
+
+
+def _hours_since(detected_at: str) -> float:
+    """Age of the fire in hours, clamped to [_ELLIPSE_T_MIN_HR, _ELLIPSE_T_MAX_HR]."""
+    try:
+        dt = datetime.fromisoformat(detected_at.replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
+    except (ValueError, AttributeError, TypeError):
+        age = 1.0
+    return max(_ELLIPSE_T_MIN_HR, min(age, _ELLIPSE_T_MAX_HR))
+
+
+def predicted_perimeter(fire: dict) -> dict | None:
+    """Build a GeoJSON Polygon footprint from spread rate + wind for a single fire.
+
+    Returns None when there's not enough signal (no spread_rate or no lat/lon)
+    so the caller can fall back to whatever geometry is already there.
+    """
+    spread = float(fire.get("spread_rate_km_hr") or 0)
+    if spread <= 0:
+        return None
+    try:
+        lat = float(fire["lat"])
+        lon = float(fire["lon"])
+    except (KeyError, ValueError, TypeError):
+        return None
+
+    wind_ms = float(fire.get("wind_speed_ms") or 0)
+    # NOAA reports wind direction as the bearing the wind is COMING FROM, so
+    # the fire spreads 180° opposite. Default downhill-east when missing.
+    wind_from_deg = float(fire.get("wind_direction_deg") or 270.0)
+    spread_bearing_rad = math.radians((wind_from_deg + 180.0) % 360.0)
+
+    wind_mph = wind_ms * 2.23694
+    lb = _length_to_breadth(wind_mph)
+    # Head-to-back ratio (Alexander 1985): determines how off-center the
+    # ignition point sits inside the ellipse.
+    hb = (lb + math.sqrt(max(lb * lb - 1.0, 0.0))) / max(lb - math.sqrt(max(lb * lb - 1.0, 0.0)), 1e-6)
+
+    t = _hours_since(fire.get("detected_at", ""))
+    # Forward (head) and backward (heel) growth from the ignition point.
+    head_km = spread * t
+    back_km = head_km / hb
+    a_km = (head_km + back_km) / 2.0       # semi-major axis
+    b_km = a_km / lb                       # semi-minor axis
+    # Ellipse center is offset toward the head from the ignition point.
+    center_offset_km = (head_km - back_km) / 2.0
+
+    # Equirectangular projection — fine at fire scale (sub-100 km), avoids
+    # importing pyproj into the Lambda. cos(lat) corrects east-west scale.
+    deg_per_km_lat = 1.0 / _DEG_LAT_KM
+    deg_per_km_lon = 1.0 / (_DEG_LAT_KM * max(math.cos(math.radians(lat)), 0.01))
+
+    # Center coords: shift ignition point by center_offset along spread_bearing.
+    cx_km = math.sin(spread_bearing_rad) * center_offset_km
+    cy_km = math.cos(spread_bearing_rad) * center_offset_km
+    center_lon = lon + cx_km * deg_per_km_lon
+    center_lat = lat + cy_km * deg_per_km_lat
+
+    # Build the ellipse: parametric coords in local km, rotate to align major
+    # axis with the spread bearing, then project to lon/lat.
+    cos_b = math.cos(spread_bearing_rad)
+    sin_b = math.sin(spread_bearing_rad)
+    ring = []
+    for i in range(_ELLIPSE_VERTICES):
+        theta = 2 * math.pi * i / _ELLIPSE_VERTICES
+        # Local coords with major axis along +y (north). cos(θ) → cross-axis (b).
+        local_x = b_km * math.cos(theta)
+        local_y = a_km * math.sin(theta)
+        # Rotate so +y aligns with spread bearing. Rotation matrix for clockwise-from-north.
+        east_km =  local_x * cos_b + local_y * sin_b
+        north_km = -local_x * sin_b + local_y * cos_b
+        ring.append([
+            center_lon + east_km * deg_per_km_lon,
+            center_lat + north_km * deg_per_km_lat,
+        ])
+    ring.append(ring[0])  # close the ring
+
+    return {"type": "Polygon", "coordinates": [ring]}
+
+
+# ------------------------------------------------------------------
 # Risk score
 # ------------------------------------------------------------------
 
@@ -350,6 +452,7 @@ def write_enriched_fire(enriched: dict) -> None:
         "population_at_risk", "watershed_sites_at_risk",
         "nearest_stations", "dispatch_recommendation",
         "spread_rate_km_hr", "spread_rate_km2_per_hr", "spread_projections", "enriched_at",
+        "perimeter_geojson", "perimeter_source",
     ]
     for field in enriched_fields:
         if field in enriched:
@@ -442,6 +545,15 @@ def enrich_fire(fire: dict) -> dict:
     # 6. Risk score — computed locally, used by EventBridge dispatch trigger.
     fire["risk_score"] = compute_risk_score(fire)
 
+    # 7. Predicted perimeter — only synthesize when we don't already have a real
+    # one. CAL FIRE incidents arrive with a mapped MultiPolygon perimeter from
+    # the scraper (#7); FIRMS hotspots are points and need the ellipse.
+    if not fire.get("perimeter_geojson"):
+        ellipse = predicted_perimeter(fire)
+        if ellipse is not None:
+            fire["perimeter_geojson"] = json.dumps(ellipse)
+            fire["perimeter_source"] = "predicted"
+
     fire["enriched_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return fire
 
@@ -465,7 +577,12 @@ def handler(event, context):
 
         new_image = record.get("dynamodb", {}).get("NewImage", {})
         # DynamoDB Streams returns values in DynamoDB JSON format — flatten to Python.
-        fire = {k: list(v.values())[0] for k, v in new_image.items()}
+        # NULL must map to None (not True) so downstream truthy-checks behave; otherwise
+        # `perimeter_geojson: NULL` gets re-written as Bool True and breaks /fires.
+        fire = {
+            k: (None if "NULL" in v else list(v.values())[0])
+            for k, v in new_image.items()
+        }
 
         fire_id = fire.get("fire_id", "unknown")
         # The fires table also holds NOAA weather cache + CAL FIRE dedup state
