@@ -57,15 +57,30 @@ function circlePolygon([lon, lat], radiusKm) {
 // (functions/enrich/handler.py, Anderson 1983 / Andrews 2018). Mock fires
 // arrive without server-side enrichment, so we run the same ellipse math
 // locally to keep their footprints visually consistent with live fires.
-const ELLIPSE_VERTICES = 32
+const ELLIPSE_VERTICES = 64       // bumped so noise has room to read as fingers
 const ELLIPSE_T_MIN_HR = 0.5
 const ELLIPSE_T_MAX_HR = 24.0
 const DEG_LAT_KM = 111.0
+const ELLIPSE_LB_MAX = 3.5        // visual cap — Anderson's curve hits 8 fast at
+                                  // 10 mph wind, which reads as a needle on the map
+const NOISE_AMPLITUDE = 0.22      // ±22% radius warp — irregular but still readable
+const NOISE_FREQS = [3, 5, 8]     // 3 octaves of finger-sized lobes around the ring
+
+// Cheap deterministic hash → seed. Same fire_id always produces the same shape
+// so the perimeter doesn't shimmer between renders.
+function seedFromId(id) {
+  let h = 2166136261
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return (h >>> 0) / 4294967295
+}
 
 function lengthToBreadth(windMph) {
   const u = Math.max(0, windMph)
   const lb = 0.936 * Math.exp(0.2566 * u) + 0.461 * Math.exp(-0.1548 * u) - 0.397
-  return Math.max(1.0, Math.min(lb, 8.0))
+  return Math.max(1.0, Math.min(lb, ELLIPSE_LB_MAX))
 }
 
 function hoursSince(detectedAt) {
@@ -113,13 +128,24 @@ function predictedPerimeter(props) {
   const centerLon = lon + cxKm * degPerKmLon
   const centerLat = lat + cyKm * degPerKmLat
 
+  // Per-fire phase offsets so noise pattern is stable but unique per fire.
+  const seed = seedFromId(String(props.fire_id || `${lat},${lon}`))
+  const phases = NOISE_FREQS.map((_, k) => seed * Math.PI * 2 * (k + 1.7))
+
   const cosB = Math.cos(spreadBearingRad)
   const sinB = Math.sin(spreadBearingRad)
   const ring = []
   for (let i = 0; i <= ELLIPSE_VERTICES; i++) {
     const theta = (2 * Math.PI * i) / ELLIPSE_VERTICES
-    const localX = bKm * Math.cos(theta)
-    const localY = aKm * Math.sin(theta)
+    // Sum a few sine waves around the ring → finger-shaped lobes that read as
+    // a real burn scar instead of a smooth oval.
+    let warp = 0
+    for (let k = 0; k < NOISE_FREQS.length; k++) {
+      warp += Math.sin(theta * NOISE_FREQS[k] + phases[k]) / NOISE_FREQS.length
+    }
+    const r = 1 + warp * NOISE_AMPLITUDE
+    const localX = bKm * Math.cos(theta) * r
+    const localY = aKm * Math.sin(theta) * r
     const eastKm = localX * cosB + localY * sinB
     const northKm = -localX * sinB + localY * cosB
     ring.push([centerLon + eastKm * degPerKmLon, centerLat + northKm * degPerKmLat])
@@ -184,16 +210,58 @@ function ensurePolygonGeometry(feature) {
   }
 }
 
-// Derives a FeatureCollection of alert-zone circles from the fire features.
-// Kept as a separate source so the zone fill can sit under the fire footprint
-// without confusing layer stacking or hover targets.
+// Push every vertex of a polygon outward (radially from the centroid) by
+// `bufferKm`. Approximate but correct enough for the roughly-convex ellipses
+// we generate — preserves shape so an elongated fire gets an elongated halo.
+function offsetPolygonOutward(geometry, centroid, bufferKm) {
+  const ring = geometry?.coordinates?.[0]
+  if (!ring?.length || !centroid) return null
+  const [cLon, cLat] = centroid
+  const degPerKmLat = 1.0 / DEG_LAT_KM
+  const degPerKmLon = 1.0 / (DEG_LAT_KM * Math.max(Math.cos((cLat * Math.PI) / 180), 0.01))
+  const offset = ring.map(([lon, lat]) => {
+    const dxKm = (lon - cLon) / degPerKmLon
+    const dyKm = (lat - cLat) / degPerKmLat
+    const dist = Math.hypot(dxKm, dyKm)
+    if (dist === 0) return [lon, lat]
+    const scale = (dist + bufferKm) / dist
+    return [cLon + dxKm * scale * degPerKmLon, cLat + dyKm * scale * degPerKmLat]
+  })
+  return { type: 'Polygon', coordinates: [offset] }
+}
+
+// Alert zone = perimeter polygon expanded outward by `alert_radius_km`. For
+// fires without a real perimeter (no spread/wind signal) we fall back to a
+// plain circle around the centroid so something always renders. Kept as a
+// separate source so the zone fill can sit under the fire footprint without
+// confusing layer stacking or hover targets.
 export function buildAlertZones(fireCollection) {
   const features = (fireCollection?.features || [])
     .map((f) => {
       const p = f.properties || {}
-      const center = p.centroid || polygonCentroid(f.geometry)
       const radius = p.alert_radius_km
-      if (!center || !radius) return null
+      if (!radius) return null
+      // For polygon fires, expand around the polygon's own centroid — using
+      // p.centroid (the ignition point) skews the offset toward the head of
+      // the ellipse and produces a lopsided halo.
+      if (f.geometry?.type === 'Polygon') {
+        const polyCenter = polygonCentroid(f.geometry)
+        const geometry = polyCenter && offsetPolygonOutward(f.geometry, polyCenter, radius)
+        if (!geometry) return null
+        return {
+          type: 'Feature',
+          geometry,
+          properties: {
+            fire_id: p.fire_id,
+            name: p.name,
+            population_at_risk: p.population_at_risk,
+            alert_radius_km: radius,
+          },
+        }
+      }
+      // Point fallback: plain circle around the ignition centroid.
+      const center = p.centroid
+      if (!center) return null
       return {
         type: 'Feature',
         geometry: circlePolygon(center, radius),

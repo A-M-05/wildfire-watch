@@ -13,6 +13,7 @@ Trigger: DynamoDB Streams (fires table, NEW_IMAGE on INSERT)
 Emits: EventBridge `wildfire-watch.enrichment` / `FireEnriched`
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -295,18 +296,74 @@ def get_dispatch_recommendation(fire_event: dict) -> dict:
 # priority — see enrich_fire() guard.
 # ------------------------------------------------------------------
 
-_ELLIPSE_VERTICES = 32   # 32 reads as a smooth oval at typical zooms
+_ELLIPSE_VERTICES = 64   # higher than the smooth-oval default so noise reads as fingers
 _ELLIPSE_T_MIN_HR = 0.5  # floor: even brand-new fires get a visible footprint
 _ELLIPSE_T_MAX_HR = 24.0 # ceiling: stale fires shouldn't grow without bound
 _DEG_LAT_KM = 111.0      # degrees-per-km for equirectangular projection
+_ELLIPSE_LB_MAX = 3.5    # visual cap — Anderson's curve hits 8 at ~10 mph wind
+                         # which reads as a needle on the map
+_NOISE_AMPLITUDE = 0.22  # ±22% radius warp — irregular but still readable
+_NOISE_FREQS = (3, 5, 8) # 3 sine octaves for finger-sized lobes around the ring
+
+# Terrain-aware spread: sample elevation around the fire and stretch the warp
+# in the uphill direction. Rule of thumb (Rothermel/Andrews): rate of spread
+# roughly doubles per ~20° of upslope. We compress that into a unit-less stretch
+# applied to the radius warp, so the perimeter visibly bulges uphill.
+_TERRAIN_SAMPLES = 8                   # 8 cardinal directions around the fire
+_TERRAIN_RADIUS_KM = 5.0               # how far out we probe for relief
+_TERRAIN_STRETCH = 0.6                 # max additional radius warp toward uphill (60%)
+_OPEN_TOPO_URL = "https://api.opentopodata.org/v1/aster30m"  # free, no auth, ~3s budget
+
+
+def _sample_uphill(lat: float, lon: float) -> tuple[float, float] | None:
+    """Probe elevation around the fire, return (uphill_bearing_rad, strength_0_1).
+
+    strength is 0 on flat ground and 1 when the local relief is ≥300 m
+    (steep canyon scale). Returns None on any API failure so the caller can
+    fall back to the flat-ground ellipse.
+    """
+    deg_per_km_lat = 1.0 / _DEG_LAT_KM
+    deg_per_km_lon = 1.0 / (_DEG_LAT_KM * max(math.cos(math.radians(lat)), 0.01))
+    bearings = [2 * math.pi * i / _TERRAIN_SAMPLES for i in range(_TERRAIN_SAMPLES)]
+    pts = []
+    for b in bearings:
+        d_lat = math.cos(b) * _TERRAIN_RADIUS_KM * deg_per_km_lat
+        d_lon = math.sin(b) * _TERRAIN_RADIUS_KM * deg_per_km_lon
+        pts.append(f"{lat + d_lat},{lon + d_lon}")
+    try:
+        resp = requests.get(
+            _OPEN_TOPO_URL,
+            params={"locations": "|".join(pts)},
+            timeout=3,
+        )
+        resp.raise_for_status()
+        elevations = [r.get("elevation") for r in resp.json().get("results", [])]
+    except Exception as exc:
+        logger.warning("terrain_sample_failed lat=%s lon=%s err=%s", lat, lon, exc)
+        return None
+    if any(e is None for e in elevations) or len(elevations) != _TERRAIN_SAMPLES:
+        return None
+    # Treat samples as a vector field: weight each direction by elevation.
+    ex = sum(e * math.sin(b) for e, b in zip(elevations, bearings))
+    ey = sum(e * math.cos(b) for e, b in zip(elevations, bearings))
+    bearing = math.atan2(ex, ey)  # math convention: x=east, y=north
+    relief = max(elevations) - min(elevations)
+    strength = min(1.0, relief / 300.0)
+    return bearing, strength
 
 
 def _length_to_breadth(wind_mph: float) -> float:
     """Anderson 1983 fire-shape ratio. Calm wind → near-circular, strong wind → cigar."""
     u = max(0.0, wind_mph)
     lb = 0.936 * math.exp(0.2566 * u) + 0.461 * math.exp(-0.1548 * u) - 0.397
-    # Clamp: LB < 1 is unphysical, LB > 8 produces visually broken shapes.
-    return max(1.0, min(lb, 8.0))
+    # Clamp: LB < 1 is unphysical, large LB looks like a needle on the map.
+    return max(1.0, min(lb, _ELLIPSE_LB_MAX))
+
+
+def _seed_from_id(fire_id: str) -> float:
+    """Cheap deterministic 0..1 seed from fire_id so each fire's noise is stable."""
+    h = hashlib.sha1(fire_id.encode()).digest()
+    return int.from_bytes(h[:4], "big") / 0xFFFFFFFF
 
 
 def _hours_since(detected_at: str) -> float:
@@ -367,15 +424,39 @@ def predicted_perimeter(fire: dict) -> dict | None:
     center_lat = lat + cy_km * deg_per_km_lat
 
     # Build the ellipse: parametric coords in local km, rotate to align major
-    # axis with the spread bearing, then project to lon/lat.
+    # axis with the spread bearing, then project to lon/lat. A few sine octaves
+    # warp the radius so the perimeter reads as an irregular burn scar instead
+    # of a smooth oval — phases are seeded on fire_id so the shape is stable.
+    seed = _seed_from_id(str(fire.get("fire_id") or f"{lat},{lon}"))
+    phases = [seed * 2 * math.pi * (k + 1.7) for k in range(len(_NOISE_FREQS))]
+
+    # Terrain bias — vertices facing uphill bulge out, downhill compress in.
+    # Skip the sample on the SageMaker-only "current_area_km2" sentinel because
+    # repeat HTTP calls in a tight loop blow the Lambda budget; the sample is
+    # ~300 ms when the API is healthy.
+    uphill = _sample_uphill(lat, lon) if fire.get("fire_id") else None
+
     cos_b = math.cos(spread_bearing_rad)
     sin_b = math.sin(spread_bearing_rad)
     ring = []
     for i in range(_ELLIPSE_VERTICES):
         theta = 2 * math.pi * i / _ELLIPSE_VERTICES
+        warp = sum(
+            math.sin(theta * f + phases[k]) for k, f in enumerate(_NOISE_FREQS)
+        ) / len(_NOISE_FREQS)
+        r = 1.0 + warp * _NOISE_AMPLITUDE
+        if uphill is not None:
+            uphill_bearing, uphill_strength = uphill
+            # `theta` runs counter-clockwise from local +x (east). Convert ring
+            # angle into a compass bearing (clockwise from north) so we can
+            # compare directly against uphill_bearing.
+            vert_bearing = math.atan2(math.cos(theta) * sin_b + math.sin(theta) * cos_b,
+                                       math.cos(theta) * cos_b - math.sin(theta) * sin_b)
+            align = math.cos(vert_bearing - uphill_bearing)  # 1 uphill, -1 downhill
+            r *= 1.0 + _TERRAIN_STRETCH * uphill_strength * max(align, -0.5)
         # Local coords with major axis along +y (north). cos(θ) → cross-axis (b).
-        local_x = b_km * math.cos(theta)
-        local_y = a_km * math.sin(theta)
+        local_x = b_km * math.cos(theta) * r
+        local_y = a_km * math.sin(theta) * r
         # Rotate so +y aligns with spread bearing. Rotation matrix for clockwise-from-north.
         east_km =  local_x * cos_b + local_y * sin_b
         north_km = -local_x * sin_b + local_y * cos_b
@@ -452,7 +533,7 @@ def write_enriched_fire(enriched: dict) -> None:
         "population_at_risk", "watershed_sites_at_risk",
         "nearest_stations", "dispatch_recommendation",
         "spread_rate_km_hr", "spread_rate_km2_per_hr", "spread_projections", "enriched_at",
-        "perimeter_geojson", "perimeter_source",
+        "perimeter_geojson", "perimeter_source", "alert_radius_km",
     ]
     for field in enriched_fields:
         if field in enriched:
@@ -553,6 +634,13 @@ def enrich_fire(fire: dict) -> dict:
         if ellipse is not None:
             fire["perimeter_geojson"] = json.dumps(ellipse)
             fire["perimeter_source"] = "predicted"
+
+    # 8. Alert radius — used by the frontend as a *buffer* around the perimeter
+    # for the evac halo, and by the resident-alerter to decide who to text.
+    # Scale with how far the head can spread so big fires get bigger zones.
+    spread_km_hr = float(fire.get("spread_rate_km_hr") or 0)
+    head_km = spread_km_hr * _hours_since(fire.get("detected_at", ""))
+    fire.setdefault("alert_radius_km", round(max(1.5, head_km + 1.0), 2))
 
     fire["enriched_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return fire
