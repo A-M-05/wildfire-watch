@@ -39,7 +39,8 @@ MessagingStack(app, "WildfireWatchMessaging",
 
 FrontendStack(app, "WildfireWatchFrontend",
     env=env,
-    description="Wildfire Watch - Cognito, API Gateway, Amplify (issue #5)",
+    fires_table=core.fires_table,
+    description="Wildfire Watch - Cognito, API Gateway, Amplify (issue #5) + GET /fires (issue #105)",
 )
 
 ScraperStack(app, "WildfireWatchScraper",
