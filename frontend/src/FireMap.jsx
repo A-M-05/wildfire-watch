@@ -544,9 +544,14 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       })
     }
 
+    const mockBadge = (p) =>
+      String(p.fire_id || '').startsWith('demo-')
+        ? ` <span style="display:inline-block;background:#6b7280;color:#fff;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;vertical-align:middle">mock</span>`
+        : ''
+
     const firePopupHTML = (p) => {
       const lines = [
-        `<strong>${p.name || 'Unnamed fire'}</strong>`,
+        `<strong>${p.name || 'Unnamed fire'}</strong>${mockBadge(p)}`,
         p.location ? `${p.location}` : null,
         p.county ? `County: ${p.county}` : null,
         `Containment: ${p.containment_pct}%`,
@@ -589,7 +594,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
         evacLine = `Evac route: computing…`
       }
       return (
-        `<strong>Alert zone — ${p.name || 'fire'}</strong><br/>` +
+        `<strong>Alert zone — ${p.name || 'fire'}</strong>${mockBadge(p)}<br/>` +
         `Radius: ${Number(p.alert_radius_km).toFixed(1)} km<br/>` +
         `Population at risk: ~${Number(p.population_at_risk).toLocaleString()}<br/>` +
         `${evacLine}`
@@ -741,9 +746,12 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
 
     // Dispatch tether: clear, then refill from the selected fire's dispatched
     // units. Token guards against stale fetches racing a fast selection change.
+    // Contained fires (100%) suppress tethers — perimeter is held, no active
+    // dispatch to visualize. Matches DispatchPanel's `isContained` convention.
     const tetherSrc = map.getSource('dispatch-tethers')
     if (tetherSrc) tetherSrc.setData({ type: 'FeatureCollection', features: [] })
-    if (selectedFire) {
+    const contained = (selectedFire?.properties?.containment_pct ?? 0) >= 100
+    if (selectedFire && !contained) {
       const token = ++dispatchTokenRef.current
       fetchDispatchData(selectedFire).then((data) => {
         if (token !== dispatchTokenRef.current) return

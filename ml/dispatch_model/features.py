@@ -50,10 +50,16 @@ def spread_to_dispatch(spread_rate: float) -> tuple:
 def spread_to_confidence(spread_rate: float, projected_area: float) -> float:
     """Derive a 0-1 confidence score from spread predictions.
 
-    Confidence is low near decision boundaries (1.2 and 3.0 km²/hr) where
-    the dispatch call is ambiguous — this is exactly when we want a human
-    in the loop. Far from boundaries, confidence is high and auto-approval
-    is appropriate.
+    Confidence is low near decision boundaries (DISPATCH_THRESHOLDS values:
+    0.5 and 1.5 km²/hr) where the dispatch call is ambiguous — this is
+    exactly when we want a human in the loop. Far from boundaries,
+    confidence is high and auto-approval is appropriate.
+
+    Property worth knowing: with boundaries at 0.5 and 1.5, the MUTUAL_AID
+    band is only 1.0 km²/hr wide, so max boundary_confidence inside it is
+    0.25 (at the midpoint, spread=1.0). Even with area_factor=1.0 the
+    overall confidence caps at 0.475 in this band — every MUTUAL_AID call
+    routes to human review by design.
     """
     thresholds = sorted(DISPATCH_THRESHOLDS.values())
     min_distance = min(abs(spread_rate - t) for t in thresholds)

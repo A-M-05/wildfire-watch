@@ -5,7 +5,7 @@ Read this file at the start of every session.
 ## What we're building
 
 A real-time wildfire resource dispatch and community alert system. Two hackathon tracks:
-- **Environmental** — live fire + watershed/reservoir water-level monitoring for evacuation prediction
+- **Environmental** — live fire detection + evacuation prediction for at-risk communities
 - **AI Safety** — every AI recommendation is audited, validated, and gated before reaching people
 
 **Demo target:** Fire detected → resources dispatched → resident SMS in under 60 seconds.
@@ -75,7 +75,6 @@ Each domain has a dedicated agent file in `.claude/agents/`. Use them — they c
   "wind_speed_ms": float,
   "wind_direction_deg": float,
   "population_at_risk": int,
-  "watershed_sites_at_risk": ["site_id"],
   "nearest_stations": [{"station_id": "string", "distance_km": float, "available": bool}]
 }
 ```
@@ -87,7 +86,6 @@ Each domain has a dedicated agent file in `.claude/agents/`. Use them — they c
 | NASA FIRMS | firms.modaps.eosdis.nasa.gov/api | Every 3h |
 | CAL FIRE | fire.ca.gov/incidents (GeoJSON) | Every 10-15 min |
 | NOAA Weather | api.weather.gov | Hourly |
-| USGS Water | waterservices.usgs.gov | Real-time |
 | EPA TRI | epa.gov/toxics-release-inventory | Annual (static) |
 | US Census | api.census.gov | Annual (static) |
 

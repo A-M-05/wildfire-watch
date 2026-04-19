@@ -1,6 +1,6 @@
 {
   "type": "FeatureCollection",
-  "_comment": "Demo dataset. Five fires spanning the full size + containment spectrum so the UI shows differentiated footprints, alert halos, and evac routes. Toggled by VITE_USE_MOCK_FIRES=true. Enriched fields (risk_score, confidence, population_at_risk, alert_radius_km, wind_*) are pre-baked here so mock mode renders the same UI as the live /fires endpoint.",
+  "_comment": "Demo dataset. Seven fires spanning the full size + containment + confidence spectrum so the UI shows differentiated footprints, alert halos, evac routes, AND the safety-gate human-review path. Two fires are deliberately under the 0.65 confidence gate: demo-anza-borrego-hotspot (FIRMS detection confidence low — possible sun-glint / ag burn) and demo-ojai-backcountry (dispatch confidence low — spread rate 1.95 sits just above the AERIAL escalation threshold of 1.5 km²/hr, so a small input perturbation could flip the call back to MUTUAL_AID; spread_to_confidence in ml/dispatch_model/features.py returns ~0.46 here). Toggled by VITE_USE_MOCK_FIRES=true. Enriched fields (risk_score, confidence, population_at_risk, alert_radius_km, wind_*) are pre-baked here so mock mode renders the same UI as the live /fires endpoint.",
   "features": [
     {
       "type": "Feature",
@@ -121,6 +121,54 @@
         "alert_radius_km": 45.0
       },
       "geometry": { "type": "Point", "coordinates": [-122.62, 40.62] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "fire_id": "demo-anza-borrego-hotspot",
+        "source": "FIRMS",
+        "name": "Anza-Borrego Hotspot",
+        "lat": 33.27,
+        "lon": -116.40,
+        "containment_pct": 0,
+        "acres_burned": 12,
+        "spread_rate_km2_per_hr": 0.2,
+        "county": "San Diego",
+        "location": "Anza-Borrego Desert, near Borrego Springs",
+        "detected_at": "2026-04-18T20:05:00Z",
+        "last_updated": "2026-04-18T20:36:00Z",
+        "confidence": 0.35,
+        "risk_score": 0.22,
+        "wind_speed_ms": 3.2,
+        "wind_direction_deg": 270,
+        "population_at_risk": 180,
+        "alert_radius_km": 1.4
+      },
+      "geometry": { "type": "Point", "coordinates": [-116.40, 33.27] }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "fire_id": "demo-ojai-backcountry",
+        "source": "CALFIRE",
+        "name": "Ojai Backcountry Fire",
+        "lat": 34.55,
+        "lon": -119.30,
+        "containment_pct": 25,
+        "acres_burned": 620,
+        "spread_rate_km2_per_hr": 1.95,
+        "county": "Ventura",
+        "location": "Los Padres NF, north of Ojai",
+        "detected_at": "2026-04-18T15:20:00Z",
+        "last_updated": "2026-04-18T20:34:00Z",
+        "confidence": 0.46,
+        "risk_score": 0.49,
+        "wind_speed_ms": 7.6,
+        "wind_direction_deg": 210,
+        "population_at_risk": 4500,
+        "alert_radius_km": 5.8
+      },
+      "geometry": { "type": "Point", "coordinates": [-119.30, 34.55] }
     }
   ]
 }
