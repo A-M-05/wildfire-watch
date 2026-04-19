@@ -109,19 +109,18 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       type: 'circle',
       source: 'fire-stations',
       paint: {
+        // Smaller deltas + longer duration — the previous 7→10 jump landed
+        // hard. 7→8.5 is enough to read as "this one" without snapping.
         'circle-radius': [
-          'case', ['boolean', ['feature-state', 'hover'], false], 10, 7,
+          'case', ['boolean', ['feature-state', 'hover'], false], 8.5, 7,
         ],
-        'circle-color': [
-          'case', ['boolean', ['feature-state', 'hover'], false], '#1faa3b', '#22cc44',
-        ],
+        'circle-color': '#22cc44',
         'circle-stroke-width': [
-          'case', ['boolean', ['feature-state', 'hover'], false], 3, 1.5,
+          'case', ['boolean', ['feature-state', 'hover'], false], 2.5, 1.5,
         ],
         'circle-stroke-color': '#ffffff',
-        'circle-radius-transition': { duration: 180 },
-        'circle-color-transition': { duration: 180 },
-        'circle-stroke-width-transition': { duration: 180 },
+        'circle-radius-transition': { duration: 320 },
+        'circle-stroke-width-transition': { duration: 320 },
       },
     })
   }
@@ -139,18 +138,15 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       source: 'reservoirs',
       paint: {
         'circle-radius': [
-          'case', ['boolean', ['feature-state', 'hover'], false], 12, 8,
+          'case', ['boolean', ['feature-state', 'hover'], false], 9.5, 8,
         ],
-        'circle-color': [
-          'case', ['boolean', ['feature-state', 'hover'], false], '#1565c0', '#1e88e5',
-        ],
+        'circle-color': '#1e88e5',
         'circle-stroke-width': [
-          'case', ['boolean', ['feature-state', 'hover'], false], 3, 1.5,
+          'case', ['boolean', ['feature-state', 'hover'], false], 2.5, 1.5,
         ],
         'circle-stroke-color': '#ffffff',
-        'circle-radius-transition': { duration: 180 },
-        'circle-color-transition': { duration: 180 },
-        'circle-stroke-width-transition': { duration: 180 },
+        'circle-radius-transition': { duration: 320 },
+        'circle-stroke-width-transition': { duration: 320 },
       },
     })
   }
