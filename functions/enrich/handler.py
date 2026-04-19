@@ -450,6 +450,9 @@ def enrich_fire(fire: dict) -> dict:
 # Lambda handler
 # ------------------------------------------------------------------
 
+_NON_FIRE_PREFIXES = ("NOAA_CACHE#", "CALFIRE_STATE#")
+
+
 def handler(event, context):
     """DynamoDB Streams trigger — process INSERT records only."""
     processed = 0
@@ -465,6 +468,11 @@ def handler(event, context):
         fire = {k: list(v.values())[0] for k, v in new_image.items()}
 
         fire_id = fire.get("fire_id", "unknown")
+        # The fires table also holds NOAA weather cache + CAL FIRE dedup state
+        # rows (same primary key shape, distinguishable by fire_id prefix).
+        # Skip them — they aren't fires.
+        if any(str(fire_id).startswith(p) for p in _NON_FIRE_PREFIXES):
+            continue
         try:
             enriched = enrich_fire(fire)
             write_enriched_fire(enriched)
