@@ -3,6 +3,7 @@ import 'mapbox-gl/dist/mapbox-gl.css'
 import { useEffect, useRef, useState } from 'react'
 import { fetchActiveFires, buildAlertZones } from './api/fires'
 import { buildEvacRoutes, routeSummaryForFire, RED_CROSS_SHELTERS_LIST } from './api/evacRoutes'
+import { fetchDispatchData } from './api/dispatch'
 import { nearestReservoir, loadReservoirs, droughtSeverity } from './api/reservoirs'
 import { useFireWebSocket } from './api/websocket'
 
@@ -91,6 +92,8 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
   const selectedFireId = selectedFire?.properties?.fire_id ?? null
   const selectedFireIdRef = useRef(null)
   selectedFireIdRef.current = selectedFireId
+  // Discards stale fetchDispatchData responses when selection changes mid-flight.
+  const dispatchTokenRef = useRef(0)
 
   // Mapbox filter expression that matches a single fire_id (or matches nothing
   // when null is passed). Used to scope evac route + destination visibility.
@@ -205,6 +208,32 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       },
       paint: { 'text-color': '#ffffff' },
     })
+  }
+
+  // Thin marching-ants line from each dispatched station to the selected fire.
+  // Source is replaced wholesale on selection change (empty when nothing's
+  // selected). Drawn beneath fire-stations-circle so the station dot keeps the
+  // click. Dash sequence is animated by the rAF loop in the main effect.
+  const addDispatchTethersLayer = (map) => {
+    if (map.getLayer('dispatch-tethers')) map.removeLayer('dispatch-tethers')
+    if (map.getSource('dispatch-tethers')) map.removeSource('dispatch-tethers')
+    map.addSource('dispatch-tethers', {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] },
+    })
+    const beforeId = map.getLayer('fire-stations-circle') ? 'fire-stations-circle' : undefined
+    map.addLayer({
+      id: 'dispatch-tethers',
+      type: 'line',
+      source: 'dispatch-tethers',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': '#1f9d55',
+        'line-width': 2.2,
+        'line-opacity': 0.9,
+        'line-dasharray': [0, 4, 3],
+      },
+    }, beforeId)
   }
 
   // Fire perimeter fill + outline. Polygon footprint is scaled by acres burned
@@ -515,6 +544,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
         console.warn('reservoir layer skipped:', e.message)
       }
       addRedCrossLayer(map)
+      addDispatchTethersLayer(map)
       await refreshFires(map)
     })
 
@@ -720,8 +750,31 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       popup.remove()
     })
 
+    // Marching-ants animation for dispatch-tethers. Canonical 14-step Mapbox
+    // dasharray cycle, advanced every ~70ms. Tether features are built
+    // [station, fire] so forward motion = dispatch direction.
+    const DASH_SEQUENCE = [
+      [0, 4, 3], [0.5, 4, 2.5], [1, 4, 2], [1.5, 4, 1.5],
+      [2, 4, 1], [2.5, 4, 0.5], [3, 4, 0],
+      [0, 0.5, 3, 3.5], [0, 1, 3, 3], [0, 1.5, 3, 2.5],
+      [0, 2, 3, 2], [0, 2.5, 3, 1.5], [0, 3, 3, 1], [0, 3.5, 3, 0.5],
+    ]
+    const DASH_STEP_MS = 70
+    let lastDashStep = -1
+    let dashRaf = null
+    const tickDash = (now) => {
+      dashRaf = requestAnimationFrame(tickDash)
+      if (!map.getLayer('dispatch-tethers')) return
+      const step = Math.floor(now / DASH_STEP_MS) % DASH_SEQUENCE.length
+      if (step === lastDashStep) return
+      map.setPaintProperty('dispatch-tethers', 'line-dasharray', DASH_SEQUENCE[step])
+      lastDashStep = step
+    }
+    dashRaf = requestAnimationFrame(tickDash)
+
     return () => {
       clearInterval(interval)
+      cancelAnimationFrame(dashRaf)
       map.remove()
       mapRef.current = null
     }
@@ -750,7 +803,37 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       map.setFeatureState({ source: 'active-fires', id: selectedFireId }, { selected: true })
     }
     prevSelectedRef.current = selectedFireId
-  }, [selectedFireId])
+
+    // Dispatch tether: clear, then refill from the selected fire's dispatched
+    // units. Token guards against stale fetches racing a fast selection change.
+    const tetherSrc = map.getSource('dispatch-tethers')
+    if (tetherSrc) tetherSrc.setData({ type: 'FeatureCollection', features: [] })
+    if (selectedFire) {
+      const token = ++dispatchTokenRef.current
+      fetchDispatchData(selectedFire).then((data) => {
+        if (token !== dispatchTokenRef.current) return
+        const src = mapRef.current?.getSource('dispatch-tethers')
+        if (!src) return
+        const center = selectedFire.properties?.centroid
+        if (!center) return
+        const lines = []
+        for (const u of data?.dispatched_units || []) {
+          if (!u.station_id) continue
+          const feat = stationsRef.current?.features?.find(
+            (f) => f.properties.station_id === u.station_id,
+          )
+          if (!feat) continue
+          if (feat.properties.available === false) continue
+          lines.push({
+            type: 'Feature',
+            geometry: { type: 'LineString', coordinates: [feat.geometry.coordinates, center] },
+            properties: { station_id: u.station_id },
+          })
+        }
+        src.setData({ type: 'FeatureCollection', features: lines })
+      }).catch((e) => console.warn('dispatch fetch failed:', e.message))
+    }
+  }, [selectedFireId, selectedFire])
 
   // Swap basemap on theme change; re-attach stations once the new style settles.
   // Skip the first run — the map constructor already loaded the initial theme.
@@ -771,6 +854,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       if (stationsRef.current) addStationsLayer(map, stationsRef.current)
       if (reservoirsRef.current) addReservoirsLayer(map, reservoirsRef.current)
       addRedCrossLayer(map)
+      addDispatchTethersLayer(map)
       if (firesRef.current) addFiresLayer(map, firesRef.current)
       if (zonesRef.current) addAlertZonesLayer(map, zonesRef.current)
       if (routesRef.current && destsRef.current) {
