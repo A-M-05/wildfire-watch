@@ -592,11 +592,15 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     })
 
     map.on('click', 'alert-zones-fill', (e) => {
-      // Fire footprint sits *inside* the halo, so a click at that point hits
-      // both layers. Defer to the fires-fill handler below — it both selects
-      // the fire and shows the fire popup.
-      const fireHit = map.queryRenderedFeatures(e.point, { layers: ['fires-fill'] })
-      if (fireHit.length) return
+      // The halo overlaps both the fire footprint AND any reservoir/station
+      // dots inside the alert radius. Mapbox fires every layer's click handler
+      // independently, so without this deferral the dot popup briefly opens
+      // and is then overwritten by the halo popup — the user sees the halo
+      // "winning" even when they clicked the (enlarged-on-hover) dot.
+      const blockingHit = map.queryRenderedFeatures(e.point, {
+        layers: ['fires-fill', 'reservoirs-circle', 'fire-stations-circle'],
+      })
+      if (blockingHit.length) return
       const f = e.features[0]
       e.originalEvent.__layerClick = true
       const baseHtml = zonePopupHTML(f.properties)
