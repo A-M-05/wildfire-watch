@@ -249,9 +249,13 @@ function ResidentView({ fire, data, t }) {
   const { coords, status, error, request } = useUserLocation()
 
   const distance = coords && p.centroid ? haversineKm(coords, p.centroid) : null
-  const inAlertZone = distance != null && distance <= (p.alert_radius_km || 0)
+  // A 100%-contained fire still has a perimeter and an alert radius in the
+  // data, but there's no active threat — suppress the red banner so we don't
+  // panic residents about a fire that's already done.
+  const isContained = (p.containment_pct ?? 0) >= 100
+  const inAlertZone = !isContained && distance != null && distance <= (p.alert_radius_km || 0)
   const liveRoute = routeSummaryForFire(p.fire_id)
-  const mapsUrl = liveRoute
+  const mapsUrl = liveRoute && !liveRoute.contained
     ? googleMapsDirections({
         origin: coords,
         destLat: liveRoute.destination_lat,
@@ -308,30 +312,45 @@ function ResidentView({ fire, data, t }) {
           background: t.evacBoxBg, border: `1px solid ${t.evacBoxBorder}`,
           padding: '10px 12px', borderRadius: 4,
         }}>
-          <div style={{ fontSize: 11, color: t.textMuted, marginBottom: 4 }}>EVACUATION ROUTE</div>
-          {liveRoute ? (
+          {liveRoute?.contained ? (
             <>
-              <div style={{ fontSize: 14, color: t.textPrimary, fontWeight: 600 }}>
-                Evacuate to {liveRoute.destination}
+              <div style={{ fontSize: 11, color: t.textMuted, marginBottom: 4 }}>STATUS</div>
+              <div style={{ fontSize: 14, color: '#1f9d55', fontWeight: 600 }}>
+                ✓ Fire is fully contained
               </div>
               <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 4 }}>
-                {liveRoute.distance_km.toFixed(0)} km · {Math.round(liveRoute.duration_min)} min in current traffic
+                No active evacuation order. Mop-up crews remain on scene; standby
+                resources released. Continue to monitor official channels.
               </div>
-              <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
-                style={{
-                  marginTop: 10, display: 'inline-flex', alignItems: 'center', gap: 6,
-                  background: '#1a73e8', color: '#fff',
-                  padding: '7px 12px', borderRadius: 4,
-                  fontSize: 13, fontWeight: 600, textDecoration: 'none',
-                }}>
-                <GoogleMapsIcon />
-                Open route in Google Maps
-              </a>
             </>
           ) : (
-            <div style={{ fontSize: 13, color: t.textSecondary }}>
-              Loading live route from Mapbox… check back in a moment.
-            </div>
+            <>
+              <div style={{ fontSize: 11, color: t.textMuted, marginBottom: 4 }}>EVACUATION ROUTE</div>
+              {liveRoute ? (
+                <>
+                  <div style={{ fontSize: 14, color: t.textPrimary, fontWeight: 600 }}>
+                    Evacuate to {liveRoute.destination}
+                  </div>
+                  <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 4 }}>
+                    {liveRoute.distance_km.toFixed(0)} km · {Math.round(liveRoute.duration_min)} min in current traffic
+                  </div>
+                  <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
+                    style={{
+                      marginTop: 10, display: 'inline-flex', alignItems: 'center', gap: 6,
+                      background: '#1a73e8', color: '#fff',
+                      padding: '7px 12px', borderRadius: 4,
+                      fontSize: 13, fontWeight: 600, textDecoration: 'none',
+                    }}>
+                    <GoogleMapsIcon />
+                    Open route in Google Maps
+                  </a>
+                </>
+              ) : (
+                <div style={{ fontSize: 13, color: t.textSecondary }}>
+                  Loading live route from Mapbox… check back in a moment.
+                </div>
+              )}
+            </>
           )}
         </div>
       </Section>

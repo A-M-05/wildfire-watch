@@ -18,7 +18,18 @@ import requests
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-CALFIRE_URL = "https://www.fire.ca.gov/umbraco/api/IncidentApi/GeoJsonList?inactive=false"
+# www.fire.ca.gov is fronted by Akamai which 403s programmatic clients (and
+# silently returns an empty FeatureCollection from some IPs). incidents.fire.ca.gov
+# is the same data, no edge filtering. inactive=true returns recently-updated
+# incidents too — CAL FIRE marks fires `IsActive=False` quickly even when
+# they're <24h old and still relevant for our dispatch demo. We re-filter
+# client-side by Updated timestamp.
+CALFIRE_URL = "https://incidents.fire.ca.gov/umbraco/Api/IncidentApi/GeoJsonList?inactive=true"
+CALFIRE_USER_AGENT = "Mozilla/5.0 (compatible; wildfire-watch; +https://github.com/A-M-05/wildfire-watch)"
+# Hold a fire on the map for 7 days after its last update — long enough that
+# a Friday-night demo of a Tuesday fire still has data, short enough that
+# year-old incidents aren't surfaced.
+CALFIRE_MAX_AGE_DAYS = 7
 
 _STATE_PREFIX = "CALFIRE_STATE#"
 _STATE_SORT_KEY = "STATE"  # fixed sort key for dedup state rows (not real fire events)
@@ -101,12 +112,19 @@ def _normalize(feature: dict) -> dict:
     lat, lon = _centroid(geometry)
     containment_raw = props.get("PercentContained") or props.get("percentContained") or 0
 
+    # Only carry through real polygon perimeters — for Point-only incidents
+    # (the common case for small fires) we leave this null so the enrich Lambda
+    # can synthesize an ellipse from spread rate + wind. Storing the Point as
+    # perimeter_geojson would short-circuit that.
+    geo_type = geometry.get("type") if geometry else None
+    perimeter = json.dumps(geometry) if geo_type in ("Polygon", "MultiPolygon") else None
+
     return {
         "fire_id": _make_fire_id(unique_id),
         "source": "CALFIRE",
         "lat": lat,
         "lon": lon,
-        "perimeter_geojson": json.dumps(geometry) if geometry else None,
+        "perimeter_geojson": perimeter,
         # CAL FIRE publishes a 0-100 percentage; frontend + mock data both expect
         # 0-100 too, so pass it through without the divide-by-100 we used to do.
         "containment_pct": float(containment_raw),
@@ -155,15 +173,31 @@ def _save_hash(unique_id: str, perimeter_hash: str):
 # Fetch
 # ---------------------------------------------------------------------------
 
+def _is_recent(props: dict) -> bool:
+    """Keep incidents touched in the last CALFIRE_MAX_AGE_DAYS days."""
+    raw = str(props.get("Updated") or props.get("updated")
+              or props.get("StartedDateOnly") or props.get("startedDateOnly") or "")
+    if not raw:
+        return False
+    try:
+        dt = datetime.fromisoformat(raw[:19].replace("Z", "")).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    age_days = (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
+    return age_days <= CALFIRE_MAX_AGE_DAYS
+
+
 def _fetch_calfire() -> list[tuple[dict, str]]:
     """Return list of (normalized_event, perimeter_hash) for changed incidents."""
     logger.info("Fetching CAL FIRE GeoJSON: %s", CALFIRE_URL)
-    resp = requests.get(CALFIRE_URL, timeout=30)
+    resp = requests.get(CALFIRE_URL, timeout=30, headers={"User-Agent": CALFIRE_USER_AGENT})
     resp.raise_for_status()
 
     geojson = resp.json()
     features = geojson.get("features") or []
-    logger.info("calfire_raw_features count=%d", len(features))
+    raw_count = len(features)
+    features = [f for f in features if _is_recent(f.get("properties") or {})]
+    logger.info("calfire_raw_features count=%d recent=%d", raw_count, len(features))
 
     changed = []
     for feature in features:

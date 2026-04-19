@@ -13,6 +13,7 @@ Trigger: DynamoDB Streams (fires table, NEW_IMAGE on INSERT)
 Emits: EventBridge `wildfire-watch.enrichment` / `FireEnriched`
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -287,6 +288,224 @@ def get_dispatch_recommendation(fire_event: dict) -> dict:
 
 
 # ------------------------------------------------------------------
+# Predicted fire perimeter — wind-driven ellipse from Rothermel/SageMaker
+# spread rate. Anderson 1983 / Andrews 2018 length-to-breadth + head-to-back.
+#
+# Inputs are scalars from the model + NOAA wind. Output is a GeoJSON Polygon
+# ring suitable for `perimeter_geojson`. Existing CAL FIRE polygons take
+# priority — see enrich_fire() guard.
+# ------------------------------------------------------------------
+
+_ELLIPSE_VERTICES = 64   # higher than the smooth-oval default so noise reads as fingers
+_ELLIPSE_T_MIN_HR = 0.5  # floor: even brand-new fires get a visible footprint
+_ELLIPSE_T_MAX_HR = 24.0 # ceiling: stale fires shouldn't grow without bound
+_DEG_LAT_KM = 111.0      # degrees-per-km for equirectangular projection
+_ELLIPSE_LB_MAX_CALM = 2.0   # visual cap for sub-Santa-Ana winds. Anderson's
+                             # raw curve hits 5+ at single-digit wind, which
+                             # reads as a needle on the map even with cap 3.5.
+_ELLIPSE_LB_MAX_WINDY = 3.0  # SoCal Santa Ana fires can stretch further IRL,
+                             # but the demo map is the constraint — keep them
+                             # visibly fatter so the shape, not the length, reads.
+_WINDY_THRESHOLD_MPH = 15.0
+_NOISE_AMPLITUDE = 0.22  # ±22% baseline radius warp — heel scale, head bumps higher
+_NOISE_FREQS = (5, 11, 19)        # higher-frequency content reads as fingers, not waves
+_NOISE_WEIGHTS = (0.5, 0.3, 0.2)  # base frequency dominates; harmonics add texture
+# Asymmetric envelope so the heel reads calm and the head gets lumpy spotting,
+# which is how real fires look (heel = backing fire, slow & smooth; head = embers).
+_HEAD_BIAS_MIN = 0.3
+_HEAD_BIAS_MAX = 1.4
+# Sharp Gaussian "spot fingers" — as if embers jumped a ridgeline ahead of the
+# main front. Concentrated in the front 90° arc and stable per fire_id.
+_SPOT_COUNT = 2
+_SPOT_AMPLITUDE = 0.5
+_SPOT_WIDTH_RAD = math.radians(12)
+
+# Terrain-aware spread: sample elevation around the fire and stretch the warp
+# in the uphill direction. Rule of thumb (Rothermel/Andrews): rate of spread
+# roughly doubles per ~20° of upslope. We compress that into a unit-less stretch
+# applied to the radius warp, so the perimeter visibly bulges uphill.
+_TERRAIN_SAMPLES = 8                   # 8 cardinal directions around the fire
+_TERRAIN_RADIUS_KM = 5.0               # how far out we probe for relief
+_TERRAIN_STRETCH = 0.6                 # max additional radius warp toward uphill (60%)
+_OPEN_TOPO_URL = "https://api.opentopodata.org/v1/aster30m"  # free, no auth, ~3s budget
+
+
+def _sample_uphill(lat: float, lon: float) -> tuple[float, float] | None:
+    """Probe elevation around the fire, return (uphill_bearing_rad, strength_0_1).
+
+    strength is 0 on flat ground and 1 when the local relief is ≥300 m
+    (steep canyon scale). Returns None on any API failure so the caller can
+    fall back to the flat-ground ellipse.
+    """
+    deg_per_km_lat = 1.0 / _DEG_LAT_KM
+    deg_per_km_lon = 1.0 / (_DEG_LAT_KM * max(math.cos(math.radians(lat)), 0.01))
+    bearings = [2 * math.pi * i / _TERRAIN_SAMPLES for i in range(_TERRAIN_SAMPLES)]
+    pts = []
+    for b in bearings:
+        d_lat = math.cos(b) * _TERRAIN_RADIUS_KM * deg_per_km_lat
+        d_lon = math.sin(b) * _TERRAIN_RADIUS_KM * deg_per_km_lon
+        pts.append(f"{lat + d_lat},{lon + d_lon}")
+    try:
+        resp = requests.get(
+            _OPEN_TOPO_URL,
+            params={"locations": "|".join(pts)},
+            timeout=3,
+        )
+        resp.raise_for_status()
+        elevations = [r.get("elevation") for r in resp.json().get("results", [])]
+    except Exception as exc:
+        logger.warning("terrain_sample_failed lat=%s lon=%s err=%s", lat, lon, exc)
+        return None
+    if any(e is None for e in elevations) or len(elevations) != _TERRAIN_SAMPLES:
+        return None
+    # Treat samples as a vector field: weight each direction by elevation.
+    ex = sum(e * math.sin(b) for e, b in zip(elevations, bearings))
+    ey = sum(e * math.cos(b) for e, b in zip(elevations, bearings))
+    bearing = math.atan2(ex, ey)  # math convention: x=east, y=north
+    relief = max(elevations) - min(elevations)
+    strength = min(1.0, relief / 300.0)
+    return bearing, strength
+
+
+def _length_to_breadth(wind_mph: float) -> float:
+    """Anderson 1983 fire-shape ratio. Calm wind → near-circular, strong wind → cigar.
+
+    The visual cap is wind-gated: above ~15 mph (Santa Ana territory) we let the
+    ellipse stretch further because real SoCal fires actually do, and clipping
+    them flat would understate severity. Below the threshold we keep the tighter
+    cap so a mild fire doesn't look dramatic for no reason.
+    """
+    u = max(0.0, wind_mph)
+    lb = 0.936 * math.exp(0.2566 * u) + 0.461 * math.exp(-0.1548 * u) - 0.397
+    cap = _ELLIPSE_LB_MAX_WINDY if u > _WINDY_THRESHOLD_MPH else _ELLIPSE_LB_MAX_CALM
+    return max(1.0, min(lb, cap))
+
+
+def _seed_from_id(fire_id: str) -> float:
+    """Cheap deterministic 0..1 seed from fire_id so each fire's noise is stable."""
+    h = hashlib.sha1(fire_id.encode()).digest()
+    return int.from_bytes(h[:4], "big") / 0xFFFFFFFF
+
+
+def _hours_since(detected_at: str) -> float:
+    """Age of the fire in hours, clamped to [_ELLIPSE_T_MIN_HR, _ELLIPSE_T_MAX_HR]."""
+    try:
+        dt = datetime.fromisoformat(detected_at.replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
+    except (ValueError, AttributeError, TypeError):
+        age = 1.0
+    return max(_ELLIPSE_T_MIN_HR, min(age, _ELLIPSE_T_MAX_HR))
+
+
+def predicted_perimeter(fire: dict) -> dict | None:
+    """Build a GeoJSON Polygon footprint from spread rate + wind for a single fire.
+
+    Returns None when there's not enough signal (no spread_rate or no lat/lon)
+    so the caller can fall back to whatever geometry is already there.
+    """
+    spread = float(fire.get("spread_rate_km_hr") or 0)
+    if spread <= 0:
+        return None
+    try:
+        lat = float(fire["lat"])
+        lon = float(fire["lon"])
+    except (KeyError, ValueError, TypeError):
+        return None
+
+    wind_ms = float(fire.get("wind_speed_ms") or 0)
+    # NOAA reports wind direction as the bearing the wind is COMING FROM, so
+    # the fire spreads 180° opposite. Default downhill-east when missing.
+    wind_from_deg = float(fire.get("wind_direction_deg") or 270.0)
+    spread_bearing_rad = math.radians((wind_from_deg + 180.0) % 360.0)
+
+    wind_mph = wind_ms * 2.23694
+    lb = _length_to_breadth(wind_mph)
+    # Head-to-back ratio (Alexander 1985): determines how off-center the
+    # ignition point sits inside the ellipse.
+    hb = (lb + math.sqrt(max(lb * lb - 1.0, 0.0))) / max(lb - math.sqrt(max(lb * lb - 1.0, 0.0)), 1e-6)
+
+    t = _hours_since(fire.get("detected_at", ""))
+    # Forward (head) and backward (heel) growth from the ignition point.
+    head_km = spread * t
+    back_km = head_km / hb
+    a_km = (head_km + back_km) / 2.0       # semi-major axis
+    b_km = a_km / lb                       # semi-minor axis
+    # Ellipse center is offset toward the head from the ignition point.
+    center_offset_km = (head_km - back_km) / 2.0
+
+    # Equirectangular projection — fine at fire scale (sub-100 km), avoids
+    # importing pyproj into the Lambda. cos(lat) corrects east-west scale.
+    deg_per_km_lat = 1.0 / _DEG_LAT_KM
+    deg_per_km_lon = 1.0 / (_DEG_LAT_KM * max(math.cos(math.radians(lat)), 0.01))
+
+    # Center coords: shift ignition point by center_offset along spread_bearing.
+    cx_km = math.sin(spread_bearing_rad) * center_offset_km
+    cy_km = math.cos(spread_bearing_rad) * center_offset_km
+    center_lon = lon + cx_km * deg_per_km_lon
+    center_lat = lat + cy_km * deg_per_km_lat
+
+    # Build the ellipse: parametric coords in local km, rotate to align major
+    # axis with the spread bearing, then project to lon/lat. A weighted sum of
+    # high-frequency sines warps the radius so the perimeter reads as an
+    # irregular burn scar; phases are seeded on fire_id so the shape is stable.
+    seed = _seed_from_id(str(fire.get("fire_id") or f"{lat},{lon}"))
+    phases = [seed * 2 * math.pi * (k + 1.7) for k in range(len(_NOISE_FREQS))]
+    # Spot-finger bearings concentrated in the front 90° arc (theta ∈ [π/4, 3π/4])
+    # so the bumps look like ember jumps ahead of the head, not random wobble.
+    spot_bearings = [
+        math.pi / 4 + (math.pi / 2) * ((seed * (k + 3.1)) % 1.0)
+        for k in range(_SPOT_COUNT)
+    ]
+
+    # Terrain bias — vertices facing uphill bulge out, downhill compress in.
+    # Skip the sample on the SageMaker-only "current_area_km2" sentinel because
+    # repeat HTTP calls in a tight loop blow the Lambda budget; the sample is
+    # ~300 ms when the API is healthy.
+    uphill = _sample_uphill(lat, lon) if fire.get("fire_id") else None
+
+    cos_b = math.cos(spread_bearing_rad)
+    sin_b = math.sin(spread_bearing_rad)
+    ring = []
+    for i in range(_ELLIPSE_VERTICES):
+        theta = 2 * math.pi * i / _ELLIPSE_VERTICES
+        # Weighted sum: base octave dominates, harmonics add fingery texture.
+        warp = sum(
+            w * math.sin(theta * f + phases[k])
+            for k, (f, w) in enumerate(zip(_NOISE_FREQS, _NOISE_WEIGHTS))
+        )
+        # Front-heavy envelope: heel (theta ≈ -π/2) ≈ HEAD_BIAS_MIN of amplitude,
+        # head (theta ≈ +π/2) gets up to 1 + HEAD_BIAS_MAX. Calm heels, rough heads.
+        head_bias = (1.0 + math.sin(theta)) / 2.0
+        r = 1.0 + warp * _NOISE_AMPLITUDE * (_HEAD_BIAS_MIN + _HEAD_BIAS_MAX * head_bias)
+        # Spot fingers — sharp Gaussian bumps that read as ridge-jumping spotting.
+        for sb in spot_bearings:
+            d = ((theta - sb + math.pi) % (2 * math.pi)) - math.pi
+            r += _SPOT_AMPLITUDE * math.exp(-(d * d) / (2 * _SPOT_WIDTH_RAD ** 2))
+        if uphill is not None:
+            uphill_bearing, uphill_strength = uphill
+            # `theta` runs counter-clockwise from local +x (east). Convert ring
+            # angle into a compass bearing (clockwise from north) so we can
+            # compare directly against uphill_bearing.
+            vert_bearing = math.atan2(math.cos(theta) * sin_b + math.sin(theta) * cos_b,
+                                       math.cos(theta) * cos_b - math.sin(theta) * sin_b)
+            align = math.cos(vert_bearing - uphill_bearing)  # 1 uphill, -1 downhill
+            r *= 1.0 + _TERRAIN_STRETCH * uphill_strength * max(align, -0.5)
+        # Local coords with major axis along +y (north). cos(θ) → cross-axis (b).
+        local_x = b_km * math.cos(theta) * r
+        local_y = a_km * math.sin(theta) * r
+        # Rotate so +y aligns with spread bearing. Rotation matrix for clockwise-from-north.
+        east_km =  local_x * cos_b + local_y * sin_b
+        north_km = -local_x * sin_b + local_y * cos_b
+        ring.append([
+            center_lon + east_km * deg_per_km_lon,
+            center_lat + north_km * deg_per_km_lat,
+        ])
+    ring.append(ring[0])  # close the ring
+
+    return {"type": "Polygon", "coordinates": [ring]}
+
+
+# ------------------------------------------------------------------
 # Risk score
 # ------------------------------------------------------------------
 
@@ -350,6 +569,7 @@ def write_enriched_fire(enriched: dict) -> None:
         "population_at_risk", "watershed_sites_at_risk",
         "nearest_stations", "dispatch_recommendation",
         "spread_rate_km_hr", "spread_rate_km2_per_hr", "spread_projections", "enriched_at",
+        "perimeter_geojson", "perimeter_source", "alert_radius_km",
     ]
     for field in enriched_fields:
         if field in enriched:
@@ -442,6 +662,22 @@ def enrich_fire(fire: dict) -> dict:
     # 6. Risk score — computed locally, used by EventBridge dispatch trigger.
     fire["risk_score"] = compute_risk_score(fire)
 
+    # 7. Predicted perimeter — only synthesize when we don't already have a real
+    # one. CAL FIRE incidents arrive with a mapped MultiPolygon perimeter from
+    # the scraper (#7); FIRMS hotspots are points and need the ellipse.
+    if not fire.get("perimeter_geojson"):
+        ellipse = predicted_perimeter(fire)
+        if ellipse is not None:
+            fire["perimeter_geojson"] = json.dumps(ellipse)
+            fire["perimeter_source"] = "predicted"
+
+    # 8. Alert radius — used by the frontend as a *buffer* around the perimeter
+    # for the evac halo, and by the resident-alerter to decide who to text.
+    # Scale with how far the head can spread so big fires get bigger zones.
+    spread_km_hr = float(fire.get("spread_rate_km_hr") or 0)
+    head_km = spread_km_hr * _hours_since(fire.get("detected_at", ""))
+    fire.setdefault("alert_radius_km", round(max(1.5, head_km + 1.0), 2))
+
     fire["enriched_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return fire
 
@@ -465,7 +701,12 @@ def handler(event, context):
 
         new_image = record.get("dynamodb", {}).get("NewImage", {})
         # DynamoDB Streams returns values in DynamoDB JSON format — flatten to Python.
-        fire = {k: list(v.values())[0] for k, v in new_image.items()}
+        # NULL must map to None (not True) so downstream truthy-checks behave; otherwise
+        # `perimeter_geojson: NULL` gets re-written as Bool True and breaks /fires.
+        fire = {
+            k: (None if "NULL" in v else list(v.values())[0])
+            for k, v in new_image.items()
+        }
 
         fire_id = fire.get("fire_id", "unknown")
         # The fires table also holds NOAA weather cache + CAL FIRE dedup state
