@@ -531,11 +531,27 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
         low: '🟢 clear',
         unknown: 'traffic unknown',
       }[route?.traffic_severity] || ''
-      const evacLine = route
-        ? `Evac route: <strong>${route.destination}</strong> — ` +
+      const destLabel = route?.destination_type === 'shelter'
+        ? `🏠 ${route.destination}`        // live FEMA-listed shelter
+        : route?.destination               // metro fallback
+      const shelterMeta = route?.destination_type === 'shelter'
+        ? [
+            route.destination_capacity ? `cap ${route.destination_capacity}` : null,
+            route.destination_pet_friendly ? '🐾 pets OK' : null,
+          ].filter(Boolean).join(' · ')
+        : ''
+      let evacLine
+      if (route?.contained) {
+        evacLine = `<span style="color:#1f9d55;font-weight:600">✓ Fully contained — no evac in effect</span>`
+      } else if (route) {
+        evacLine =
+          `Evac route: <strong>${destLabel}</strong> — ` +
           `${route.distance_km.toFixed(0)} km · ${Math.round(route.duration_min)} min<br/>` +
+          (shelterMeta ? `<span style="color:#444;font-size:12px">${shelterMeta}</span><br/>` : '') +
           `<span style="color:#444;font-size:12px">${trafficLabel} (live)</span>`
-        : `Evac route: computing…`
+      } else {
+        evacLine = `Evac route: computing…`
+      }
       return (
         `<strong>Alert zone — ${p.name || 'fire'}</strong><br/>` +
         `Radius: ${Number(p.alert_radius_km).toFixed(1)} km<br/>` +
@@ -576,11 +592,15 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     })
 
     map.on('click', 'alert-zones-fill', (e) => {
-      // Fire footprint sits *inside* the halo, so a click at that point hits
-      // both layers. Defer to the fires-fill handler below — it both selects
-      // the fire and shows the fire popup.
-      const fireHit = map.queryRenderedFeatures(e.point, { layers: ['fires-fill'] })
-      if (fireHit.length) return
+      // The halo overlaps both the fire footprint AND any reservoir/station
+      // dots inside the alert radius. Mapbox fires every layer's click handler
+      // independently, so without this deferral the dot popup briefly opens
+      // and is then overwritten by the halo popup — the user sees the halo
+      // "winning" even when they clicked the (enlarged-on-hover) dot.
+      const blockingHit = map.queryRenderedFeatures(e.point, {
+        layers: ['fires-fill', 'reservoirs-circle', 'fire-stations-circle'],
+      })
+      if (blockingHit.length) return
       const f = e.features[0]
       e.originalEvent.__layerClick = true
       const baseHtml = zonePopupHTML(f.properties)
