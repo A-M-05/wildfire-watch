@@ -2,7 +2,7 @@
 
 A real-time wildfire resource dispatch and community alert system built for two hackathon tracks:
 
-- **Environmental** — live fire + watershed/reservoir water-level monitoring for evacuation prediction
+- **Environmental** — live fire monitoring for evacuation prediction
 - **AI Safety** — every AI recommendation is audited, validated, and gated before reaching people
 
 **Demo target:** Fire detected → resources dispatched → resident SMS in under 60 seconds.
@@ -24,7 +24,7 @@ A real-time wildfire resource dispatch and community alert system built for two 
 ### Pipeline
 
 ```
-FIRMS / CAL FIRE → ingest → enrich (NOAA + USGS) → safety gate → dispatch → alert sender → resident SMS
+FIRMS / CAL FIRE → ingest → enrich (NOAA) → safety gate → dispatch → alert sender → resident SMS
                                                           ↓
                                                    DynamoDB audit
                                                    (SHA-256 hash chain)
@@ -37,7 +37,7 @@ FIRMS / CAL FIRE → ingest → enrich (NOAA + USGS) → safety gate → dispatc
 ```
 functions/
   ingest/       # Pulls NASA FIRMS + CAL FIRE events onto Kinesis
-  enrich/       # Adds weather, watershed, population risk data
+  enrich/       # Adds weather and population risk data
   safety/       # AI safety gate: Guardrails + Bedrock advisory + audit write
   dispatch/     # SageMaker confidence check + Step Functions orchestration
   alert/        # SNS broadcast + per-resident direct SMS
@@ -72,7 +72,6 @@ ml/                   # SageMaker training scripts and model artifacts
 | NASA FIRMS | firms.modaps.eosdis.nasa.gov/api | Every 3h |
 | CAL FIRE | fire.ca.gov/incidents (GeoJSON) | Every 10–15 min |
 | NOAA Weather | api.weather.gov | Hourly |
-| USGS Water | waterservices.usgs.gov | Real-time |
 | EPA TRI | epa.gov/toxics-release-inventory | Annual (static) |
 | US Census | api.census.gov | Annual (static) |
 
