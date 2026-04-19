@@ -3,7 +3,7 @@ import 'mapbox-gl/dist/mapbox-gl.css'
 import { useEffect, useRef, useState } from 'react'
 import { fetchActiveFires, buildAlertZones } from './api/fires'
 import { buildEvacRoutes, routeSummaryForFire } from './api/evacRoutes'
-import { nearestReservoir } from './api/reservoirs'
+import { nearestReservoir, loadReservoirs, droughtSeverity } from './api/reservoirs'
 import { useFireWebSocket } from './api/websocket'
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN
@@ -32,6 +32,22 @@ const STYLES = {
 // gate auto-dispatches, below it Step Functions pauses for a human reviewer.
 // Keep these in sync; the badge color is the user-facing read of that gate.
 const CONFIDENCE_THRESHOLD = 0.65
+
+const RESERVOIR_TONES = {
+  severe:   { bg: '#c62828', label: 'drought-elevated spread risk' },
+  moderate: { bg: '#ef6c00', label: 'below-average storage' },
+  normal:   { bg: '#2e7d32', label: 'normal' },
+  unknown:  { bg: '#666',    label: 'unknown' },
+}
+
+function reservoirChipHTML(r) {
+  const tone = RESERVOIR_TONES[r.drought_severity] || RESERVOIR_TONES.unknown
+  return (
+    `<span style="display:inline-block;background:${tone.bg};color:#fff;` +
+    `padding:1px 6px;border-radius:8px;font-size:11px;font-weight:600">` +
+    `${r.pct_capacity}% capacity · ${tone.label}</span>`
+  )
+}
 
 function modelBadgeHTML(p) {
   // Records from CAL FIRE direct-fetch (pre-#105) won't carry these — show
@@ -62,6 +78,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
   const zonesRef = useRef(null)
   const routesRef = useRef(null)
   const destsRef = useRef(null)
+  const reservoirsRef = useRef(null)
   const didInitTheme = useRef(false)
   const [error, setError] = useState(null)
   const setTheme = (next) => {
@@ -93,6 +110,26 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       paint: {
         'circle-radius': 7,
         'circle-color': '#22cc44',
+        'circle-stroke-width': 1.5,
+        'circle-stroke-color': '#ffffff',
+      },
+    })
+  }
+
+  // Reservoir dots — a separate circle layer so the dispatcher can see *where*
+  // the closest water source is, not just its name in the popup. Color is fixed
+  // blue (the chip in the click popup carries the drought severity color).
+  const addReservoirsLayer = (map, data) => {
+    if (map.getLayer('reservoirs-circle')) map.removeLayer('reservoirs-circle')
+    if (map.getSource('reservoirs')) map.removeSource('reservoirs')
+    map.addSource('reservoirs', { type: 'geojson', data })
+    map.addLayer({
+      id: 'reservoirs-circle',
+      type: 'circle',
+      source: 'reservoirs',
+      paint: {
+        'circle-radius': 8,
+        'circle-color': '#1e88e5',
         'circle-stroke-width': 1.5,
         'circle-stroke-color': '#ffffff',
       },
@@ -334,25 +371,6 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     })
     mapRef.current = map
 
-    const popup = new mapboxgl.Popup({ closeButton: false, offset: 12 })
-    map.on('mouseenter', 'fire-stations-circle', (e) => {
-      map.getCanvas().style.cursor = 'pointer'
-      const f = e.features[0]
-      const { name, station_id, units } = f.properties
-      popup
-        .setLngLat(f.geometry.coordinates)
-        .setHTML(
-          `<strong>${name}</strong><br/>` +
-          `${station_id}<br/>` +
-          `Units: ${units}`
-        )
-        .addTo(map)
-    })
-    map.on('mouseleave', 'fire-stations-circle', () => {
-      map.getCanvas().style.cursor = ''
-      popup.remove()
-    })
-
     map.on('load', async () => {
       try {
         const res = await fetch(STATIONS_URL)
@@ -363,16 +381,48 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       } catch (e) {
         setError(`station load failed: ${e.message}`)
       }
+      // Reservoirs are best-effort — if the snapshot is missing the rest of
+      // the map should still work. Conversion to a FeatureCollection happens
+      // here (not in api/reservoirs.js) so that module stays focused on the
+      // nearest-fire lookup the dispatcher panel uses.
+      try {
+        const reservoirs = await loadReservoirs()
+        const data = {
+          type: 'FeatureCollection',
+          features: reservoirs.map((r) => ({
+            type: 'Feature',
+            geometry: { type: 'Point', coordinates: [r.lon, r.lat] },
+            properties: {
+              ...r,
+              drought_severity: droughtSeverity(r.pct_capacity),
+            },
+          })),
+        }
+        reservoirsRef.current = data
+        addReservoirsLayer(map, data)
+      } catch (e) {
+        console.warn('reservoir layer skipped:', e.message)
+      }
       await refreshFires(map)
     })
 
     const interval = setInterval(() => refreshFires(map), FIRE_REFRESH_MS)
 
-    const firePopup = new mapboxgl.Popup({ closeButton: false, offset: 8 })
-    const showFirePopup = (e) => {
-      map.getCanvas().style.cursor = 'pointer'
-      const f = e.features[0]
-      const p = f.properties
+    // Single shared popup — keeps "only one popup at a time" trivial. Each
+    // click handler swaps content + position; the empty-space click closes it.
+    const popup = new mapboxgl.Popup({ closeButton: true, closeOnClick: false, offset: 10 })
+
+    // Cursor pointer on hover for every clickable layer. No popup is shown on
+    // hover anymore — the user asked for click-to-open everywhere so accidental
+    // mouse drift doesn't keep nudging tooltips into view.
+    const setPointer = () => { map.getCanvas().style.cursor = 'pointer' }
+    const clearPointer = () => { map.getCanvas().style.cursor = '' }
+    for (const layer of ['fires-fill', 'alert-zones-fill', 'fire-stations-circle', 'reservoirs-circle']) {
+      map.on('mouseenter', layer, setPointer)
+      map.on('mouseleave', layer, clearPointer)
+    }
+
+    const firePopupHTML = (p) => {
       const lines = [
         `<strong>${p.name || 'Unnamed fire'}</strong>`,
         p.location ? `${p.location}` : null,
@@ -383,26 +433,10 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
         modelBadgeHTML(p),
         `<span style="color:#666;font-size:11px">Updated ${formatRelative(p.last_updated)}</span>`,
       ].filter(Boolean)
-      firePopup.setLngLat(e.lngLat).setHTML(lines.join('<br/>')).addTo(map)
-    }
-    const hideFirePopup = () => {
-      map.getCanvas().style.cursor = ''
-      firePopup.remove()
-    }
-    for (const layer of ['fires-fill']) {
-      map.on('mouseenter', layer, showFirePopup)
-      map.on('mouseleave', layer, hideFirePopup)
+      return lines.join('<br/>')
     }
 
-    // Alert-zone popup — population at risk + nearest evac route. Population
-    // and radius come from the enrichment Lambda (#9) via /fires (#105); the
-    // route summary is live Mapbox traffic data via api/evacRoutes.
-    const zonePopup = new mapboxgl.Popup({ closeButton: false, offset: 8 })
-    map.on('mouseenter', 'alert-zones-fill', (e) => {
-      const fireHit = map.queryRenderedFeatures(e.point, { layers: ['fires-fill'] })
-      if (fireHit.length) return  // fire popup wins when hovering the burned area
-      map.getCanvas().style.cursor = 'pointer'
-      const p = e.features[0].properties
+    const zonePopupHTML = (p) => {
       const route = routeSummaryForFire(p.fire_id)
       const trafficLabel = {
         severe: '🔴 severe traffic',
@@ -416,62 +450,102 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
           `${route.distance_km.toFixed(0)} km · ${Math.round(route.duration_min)} min<br/>` +
           `<span style="color:#444;font-size:12px">${trafficLabel} (live)</span>`
         : `Evac route: computing…`
-      const baseHtml =
+      return (
         `<strong>Alert zone — ${p.name || 'fire'}</strong><br/>` +
         `Radius: ${Number(p.alert_radius_km).toFixed(1)} km<br/>` +
         `Population at risk: ~${Number(p.population_at_risk).toLocaleString()}<br/>` +
         `${evacLine}`
-      zonePopup.setLngLat(e.lngLat).setHTML(baseHtml).addTo(map)
-
-      // Reservoir context — async because the snapshot fetch happens on first
-      // hover. The popup is already on screen; we patch in the chip when the
-      // lookup resolves so the user doesn't see a "loading" stub.
-      const fire = firesRef.current?.features?.find(
-        (f) => f.properties.fire_id === p.fire_id,
       )
-      const center = fire?.properties?.centroid
-      if (center) {
-        nearestReservoir(center[1], center[0]).then((r) => {
-          if (!r || !zonePopup.isOpen()) return
-          const tone = {
-            severe:   { bg: '#c62828', label: 'drought-elevated spread risk' },
-            moderate: { bg: '#ef6c00', label: 'below-average storage' },
-            normal:   { bg: '#2e7d32', label: 'normal' },
-            unknown:  { bg: '#666',    label: 'unknown' },
-          }[r.drought_severity]
-          const chip =
-            `<div style="margin-top:6px;font-size:12px">` +
-            `Nearest reservoir: <strong>${r.name}</strong> ` +
-            `(${r.distance_km.toFixed(0)} km)<br/>` +
-            `<span style="display:inline-block;background:${tone.bg};color:#fff;` +
-            `padding:1px 6px;border-radius:8px;font-size:11px;font-weight:600;` +
-            `margin-top:2px">${r.pct_capacity}% capacity · ${tone.label}</span>` +
-            `</div>`
-          zonePopup.setHTML(baseHtml + chip)
-        }).catch(() => { /* swallow — chip is best-effort */ })
-      }
-    })
-    map.on('mouseleave', 'alert-zones-fill', () => {
-      map.getCanvas().style.cursor = ''
-      zonePopup.remove()
+    }
+
+    const stationPopupHTML = (p) => (
+      `<strong>${p.name}</strong><br/>` +
+      `${p.station_id}<br/>` +
+      `Units: ${p.units}`
+    )
+
+    const reservoirPopupHTML = (p) => (
+      `<strong>${p.name}</strong><br/>` +
+      `<span style="color:#666;font-size:11px">CDEC ${p.station} · ` +
+      `${Number(p.storage_af).toLocaleString()} of ${Number(p.gross_pool_af).toLocaleString()} AF</span><br/>` +
+      `<div style="margin-top:6px">${reservoirChipHTML(p)}</div>`
+    )
+
+    // Click handlers — each marks the original event so the empty-space click
+    // listener below can tell "click hit a layer" from "click hit nothing."
+    map.on('click', 'fire-stations-circle', (e) => {
+      const f = e.features[0]
+      if (!f) return
+      e.originalEvent.__layerClick = true
+      popup.setLngLat(f.geometry.coordinates).setHTML(stationPopupHTML(f.properties)).addTo(map)
     })
 
-    // Click a fire footprint to toggle its evac route. Click again on the same
-    // fire (or any empty space) to hide it. Single-fire selection only.
+    map.on('click', 'reservoirs-circle', (e) => {
+      const f = e.features[0]
+      if (!f) return
+      e.originalEvent.__layerClick = true
+      popup.setLngLat(f.geometry.coordinates).setHTML(reservoirPopupHTML(f.properties)).addTo(map)
+    })
+
+    map.on('click', 'alert-zones-fill', (e) => {
+      // Fire footprint sits *inside* the halo, so a click at that point hits
+      // both layers. Defer to the fires-fill handler below — it both selects
+      // the fire and shows the fire popup.
+      const fireHit = map.queryRenderedFeatures(e.point, { layers: ['fires-fill'] })
+      if (fireHit.length) return
+      const f = e.features[0]
+      e.originalEvent.__layerClick = true
+      const baseHtml = zonePopupHTML(f.properties)
+      popup.setLngLat(e.lngLat).setHTML(baseHtml).addTo(map)
+      // Reservoir chip is async — patch the popup once the lookup resolves.
+      const fullFire = firesRef.current?.features?.find(
+        (x) => x.properties.fire_id === f.properties.fire_id,
+      )
+      const center = fullFire?.properties?.centroid
+      if (!center) return
+      const fireIdAtClick = f.properties.fire_id
+      nearestReservoir(center[1], center[0]).then((r) => {
+        // Bail if the user has since closed the popup or clicked a different
+        // feature — otherwise we'd splat reservoir data onto an unrelated popup.
+        if (!r || !popup.isOpen() || popup._ww_fireId !== fireIdAtClick) return
+        const chip =
+          `<div style="margin-top:6px;font-size:12px">` +
+          `Nearest reservoir: <strong>${r.name}</strong> ` +
+          `(${r.distance_km.toFixed(0)} km)<br/>` +
+          `<div style="margin-top:2px">${reservoirChipHTML(r)}</div>` +
+          `</div>`
+        popup.setHTML(baseHtml + chip)
+      }).catch(() => { /* chip is best-effort */ })
+      popup._ww_fireId = fireIdAtClick
+    })
+
+    // Fire footprint click does double duty: drives the dispatch-panel
+    // selection (existing behavior) AND opens the fire popup. Single click,
+    // single popup, panel updates in lockstep.
     map.on('click', 'fires-fill', (e) => {
       const f = e.features[0]
       if (!f?.properties?.fire_id) return
-      e.originalEvent.__fireClick = true   // suppress the empty-space deselect below
-      // queryRenderedFeatures returns a flat clone — find the matching feature
-      // in firesRef so the panel gets the full property bag (centroid, etc.)
+      e.originalEvent.__fireClick = true
+      e.originalEvent.__layerClick = true
       const full = firesRef.current?.features?.find(
         (x) => x.properties.fire_id === f.properties.fire_id,
       ) || f
-      onSelectFire((prev) => (prev?.properties?.fire_id === full.properties.fire_id ? null : full))
+      const sameFire = selectedFireIdRef.current === full.properties.fire_id
+      onSelectFire(sameFire ? null : full)
+      if (sameFire) {
+        popup.remove()
+      } else {
+        popup.setLngLat(e.lngLat).setHTML(firePopupHTML(full.properties)).addTo(map)
+      }
     })
+
+    // Empty-space click closes the popup AND deselects the fire. Layer clicks
+    // mark the event so this only fires when the user genuinely clicked nothing.
     map.on('click', (e) => {
       if (e.originalEvent.__fireClick) return
       onSelectFire(null)
+      if (e.originalEvent.__layerClick) return
+      popup.remove()
     })
 
     return () => {
@@ -507,6 +581,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     map.setStyle(STYLES[theme])
     map.once('style.load', () => {
       if (stationsRef.current) addStationsLayer(map, stationsRef.current)
+      if (reservoirsRef.current) addReservoirsLayer(map, reservoirsRef.current)
       if (firesRef.current) addFiresLayer(map, firesRef.current)
       if (zonesRef.current) addAlertZonesLayer(map, zonesRef.current)
       if (routesRef.current && destsRef.current) {
