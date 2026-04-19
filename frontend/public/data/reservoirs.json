@@ -1,0 +1,42 @@
+{
+  "fetched_at": "2026-04-19T01:04:50.651880Z",
+  "source": "California Data Exchange Center (cdec.water.ca.gov), sensor 15",
+  "reservoirs": [
+    {
+      "station": "CAS",
+      "name": "Castaic Lake",
+      "lat": 34.5239,
+      "lon": -118.6131,
+      "storage_af": 275950,
+      "gross_pool_af": 323702,
+      "pct_capacity": 85.2
+    },
+    {
+      "station": "PYM",
+      "name": "Pyramid Lake",
+      "lat": 34.6502,
+      "lon": -118.7481,
+      "storage_af": 161945,
+      "gross_pool_af": 171196,
+      "pct_capacity": 94.6
+    },
+    {
+      "station": "PRR",
+      "name": "Lake Perris",
+      "lat": 33.8556,
+      "lon": -117.1683,
+      "storage_af": 112540,
+      "gross_pool_af": 131452,
+      "pct_capacity": 85.6
+    },
+    {
+      "station": "CCH",
+      "name": "Cachuma Lake",
+      "lat": 34.5828,
+      "lon": -119.975,
+      "storage_af": 192275,
+      "gross_pool_af": 193305,
+      "pct_capacity": 99.5
+    }
+  ]
+}

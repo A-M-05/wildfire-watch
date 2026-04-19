@@ -3,6 +3,7 @@ import 'mapbox-gl/dist/mapbox-gl.css'
 import { useEffect, useRef, useState } from 'react'
 import { fetchActiveFires, buildAlertZones } from './api/fires'
 import { buildEvacRoutes, routeSummaryForFire } from './api/evacRoutes'
+import { nearestReservoir } from './api/reservoirs'
 import { useFireWebSocket } from './api/websocket'
 
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN
@@ -415,15 +416,40 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
           `${route.distance_km.toFixed(0)} km · ${Math.round(route.duration_min)} min<br/>` +
           `<span style="color:#444;font-size:12px">${trafficLabel} (live)</span>`
         : `Evac route: computing…`
-      zonePopup
-        .setLngLat(e.lngLat)
-        .setHTML(
-          `<strong>Alert zone — ${p.name || 'fire'}</strong><br/>` +
-          `Radius: ${Number(p.alert_radius_km).toFixed(1)} km<br/>` +
-          `Population at risk: ~${Number(p.population_at_risk).toLocaleString()}<br/>` +
-          `${evacLine}`
-        )
-        .addTo(map)
+      const baseHtml =
+        `<strong>Alert zone — ${p.name || 'fire'}</strong><br/>` +
+        `Radius: ${Number(p.alert_radius_km).toFixed(1)} km<br/>` +
+        `Population at risk: ~${Number(p.population_at_risk).toLocaleString()}<br/>` +
+        `${evacLine}`
+      zonePopup.setLngLat(e.lngLat).setHTML(baseHtml).addTo(map)
+
+      // Reservoir context — async because the snapshot fetch happens on first
+      // hover. The popup is already on screen; we patch in the chip when the
+      // lookup resolves so the user doesn't see a "loading" stub.
+      const fire = firesRef.current?.features?.find(
+        (f) => f.properties.fire_id === p.fire_id,
+      )
+      const center = fire?.properties?.centroid
+      if (center) {
+        nearestReservoir(center[1], center[0]).then((r) => {
+          if (!r || !zonePopup.isOpen()) return
+          const tone = {
+            severe:   { bg: '#c62828', label: 'drought-elevated spread risk' },
+            moderate: { bg: '#ef6c00', label: 'below-average storage' },
+            normal:   { bg: '#2e7d32', label: 'normal' },
+            unknown:  { bg: '#666',    label: 'unknown' },
+          }[r.drought_severity]
+          const chip =
+            `<div style="margin-top:6px;font-size:12px">` +
+            `Nearest reservoir: <strong>${r.name}</strong> ` +
+            `(${r.distance_km.toFixed(0)} km)<br/>` +
+            `<span style="display:inline-block;background:${tone.bg};color:#fff;` +
+            `padding:1px 6px;border-radius:8px;font-size:11px;font-weight:600;` +
+            `margin-top:2px">${r.pct_capacity}% capacity · ${tone.label}</span>` +
+            `</div>`
+          zonePopup.setHTML(baseHtml + chip)
+        }).catch(() => { /* swallow — chip is best-effort */ })
+      }
     })
     map.on('mouseleave', 'alert-zones-fill', () => {
       map.getCanvas().style.cursor = ''
