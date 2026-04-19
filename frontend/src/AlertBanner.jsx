@@ -59,9 +59,11 @@ export default function AlertBanner({ alert, onDismiss, theme = 'light' }) {
       }}>
         <BellIcon />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 700, letterSpacing: 0.2 }}>SMS alerts dispatched</div>
+          <div style={{ fontWeight: 700, letterSpacing: 0.2 }}>
+            SMS alerts dispatched · <span style={{ fontWeight: 600 }}>{alert.fire_name}</span>
+          </div>
           <div style={{ opacity: 0.95 }}>
-            <strong>{alert.fire_name}</strong> · {alert.alerts_sent.toLocaleString()} resident
+            {alert.alerts_sent.toLocaleString()} resident
             {alert.alerts_sent === 1 ? '' : 's'} notified · audit {alert.audit_hash.slice(0, 10)}…
           </div>
         </div>
