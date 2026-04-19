@@ -98,20 +98,30 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
 
   // Adds the stations source + circle layer. Called on first load and after
   // every setStyle() — changing the basemap wipes user-added sources/layers.
+  // generateId lets us drive hover styling via setFeatureState.
   const addStationsLayer = (map, data) => {
     if (map.getLayer('fire-stations-circle')) map.removeLayer('fire-stations-circle')
     if (map.getSource('fire-stations')) map.removeSource('fire-stations')
 
-    map.addSource('fire-stations', { type: 'geojson', data })
+    map.addSource('fire-stations', { type: 'geojson', data, generateId: true })
     map.addLayer({
       id: 'fire-stations-circle',
       type: 'circle',
       source: 'fire-stations',
       paint: {
-        'circle-radius': 7,
-        'circle-color': '#22cc44',
-        'circle-stroke-width': 1.5,
+        'circle-radius': [
+          'case', ['boolean', ['feature-state', 'hover'], false], 10, 7,
+        ],
+        'circle-color': [
+          'case', ['boolean', ['feature-state', 'hover'], false], '#1faa3b', '#22cc44',
+        ],
+        'circle-stroke-width': [
+          'case', ['boolean', ['feature-state', 'hover'], false], 3, 1.5,
+        ],
         'circle-stroke-color': '#ffffff',
+        'circle-radius-transition': { duration: 180 },
+        'circle-color-transition': { duration: 180 },
+        'circle-stroke-width-transition': { duration: 180 },
       },
     })
   }
@@ -122,22 +132,32 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
   const addReservoirsLayer = (map, data) => {
     if (map.getLayer('reservoirs-circle')) map.removeLayer('reservoirs-circle')
     if (map.getSource('reservoirs')) map.removeSource('reservoirs')
-    map.addSource('reservoirs', { type: 'geojson', data })
+    map.addSource('reservoirs', { type: 'geojson', data, generateId: true })
     map.addLayer({
       id: 'reservoirs-circle',
       type: 'circle',
       source: 'reservoirs',
       paint: {
-        'circle-radius': 8,
-        'circle-color': '#1e88e5',
-        'circle-stroke-width': 1.5,
+        'circle-radius': [
+          'case', ['boolean', ['feature-state', 'hover'], false], 12, 8,
+        ],
+        'circle-color': [
+          'case', ['boolean', ['feature-state', 'hover'], false], '#1565c0', '#1e88e5',
+        ],
+        'circle-stroke-width': [
+          'case', ['boolean', ['feature-state', 'hover'], false], 3, 1.5,
+        ],
         'circle-stroke-color': '#ffffff',
+        'circle-radius-transition': { duration: 180 },
+        'circle-color-transition': { duration: 180 },
+        'circle-stroke-width-transition': { duration: 180 },
       },
     })
   }
 
   // Fire perimeter fill + outline. Polygon footprint is scaled by acres burned
   // (see api/fires.js). Color interpolates by containment (red→green).
+  // Hover darkens the fill; selection thickens the outline.
   const addFiresLayer = (map, data) => {
     for (const id of ['fires-fill', 'fires-outline']) {
       if (map.getLayer(id)) map.removeLayer(id)
@@ -153,20 +173,49 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       100, '#22cc44',
     ]
 
-    map.addSource('active-fires', { type: 'geojson', data })
+    // promoteId so feature-state can be set by fire_id directly — needed for
+    // the selected-state hookup driven from the dispatch panel selection.
+    map.addSource('active-fires', { type: 'geojson', data, promoteId: 'fire_id' })
     map.addLayer({
       id: 'fires-fill',
       type: 'fill',
       source: 'active-fires',
       filter: ['==', ['geometry-type'], 'Polygon'],
-      paint: { 'fill-color': containmentColor, 'fill-opacity': 0.55 },
+      paint: {
+        'fill-color': containmentColor,
+        'fill-opacity': [
+          'case',
+          ['boolean', ['feature-state', 'selected'], false], 0.85,
+          ['boolean', ['feature-state', 'hover'], false], 0.75,
+          0.55,
+        ],
+        'fill-opacity-transition': { duration: 180 },
+      },
     }, 'fire-stations-circle')
     map.addLayer({
       id: 'fires-outline',
       type: 'line',
       source: 'active-fires',
       filter: ['==', ['geometry-type'], 'Polygon'],
-      paint: { 'line-color': '#000', 'line-width': 1.2, 'line-opacity': 0.4 },
+      paint: {
+        'line-color': [
+          'case', ['boolean', ['feature-state', 'selected'], false], '#000', '#000',
+        ],
+        'line-width': [
+          'case',
+          ['boolean', ['feature-state', 'selected'], false], 3,
+          ['boolean', ['feature-state', 'hover'], false], 2,
+          1.2,
+        ],
+        'line-opacity': [
+          'case',
+          ['boolean', ['feature-state', 'selected'], false], 0.9,
+          ['boolean', ['feature-state', 'hover'], false], 0.7,
+          0.4,
+        ],
+        'line-width-transition': { duration: 180 },
+        'line-opacity-transition': { duration: 180 },
+      },
     }, 'fire-stations-circle')
   }
 
@@ -179,14 +228,20 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     }
     if (map.getSource('alert-zones')) map.removeSource('alert-zones')
 
-    map.addSource('alert-zones', { type: 'geojson', data })
+    map.addSource('alert-zones', { type: 'geojson', data, promoteId: 'fire_id' })
     // Insert beneath fires-fill so the burned footprint sits visibly on top.
     const beforeId = map.getLayer('fires-fill') ? 'fires-fill' : 'fire-stations-circle'
     map.addLayer({
       id: 'alert-zones-fill',
       type: 'fill',
       source: 'alert-zones',
-      paint: { 'fill-color': '#ffaa00', 'fill-opacity': 0.12 },
+      paint: {
+        'fill-color': '#ffaa00',
+        'fill-opacity': [
+          'case', ['boolean', ['feature-state', 'hover'], false], 0.25, 0.12,
+        ],
+        'fill-opacity-transition': { duration: 180 },
+      },
     }, beforeId)
     map.addLayer({
       id: 'alert-zones-outline',
@@ -194,9 +249,15 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       source: 'alert-zones',
       paint: {
         'line-color': '#ff7700',
-        'line-width': 1.5,
-        'line-opacity': 0.7,
+        'line-width': [
+          'case', ['boolean', ['feature-state', 'hover'], false], 2.5, 1.5,
+        ],
+        'line-opacity': [
+          'case', ['boolean', ['feature-state', 'hover'], false], 1, 0.7,
+        ],
         'line-dasharray': [2, 2],
+        'line-width-transition': { duration: 180 },
+        'line-opacity-transition': { duration: 180 },
       },
     }, beforeId)
   }
@@ -412,14 +473,41 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     // click handler swaps content + position; the empty-space click closes it.
     const popup = new mapboxgl.Popup({ closeButton: true, closeOnClick: false, offset: 10 })
 
-    // Cursor pointer on hover for every clickable layer. No popup is shown on
-    // hover anymore — the user asked for click-to-open everywhere so accidental
-    // mouse drift doesn't keep nudging tooltips into view.
-    const setPointer = () => { map.getCanvas().style.cursor = 'pointer' }
-    const clearPointer = () => { map.getCanvas().style.cursor = '' }
-    for (const layer of ['fires-fill', 'alert-zones-fill', 'fire-stations-circle', 'reservoirs-circle']) {
-      map.on('mouseenter', layer, setPointer)
-      map.on('mouseleave', layer, clearPointer)
+    // Hover state per layer — drives the feature-state-based paint expressions
+    // (radius pop on circles, opacity bump on fills) so you can *see* what's
+    // under the cursor. Tracked per layer so a fire under a reservoir doesn't
+    // leave the fire stuck in hover when the cursor moves to the dot.
+    const hovered = { /* layer → { source, id } */ }
+    const setHover = (layer, sourceId, featureId) => {
+      const prev = hovered[layer]
+      if (prev && prev.id === featureId) return
+      if (prev) map.setFeatureState({ source: prev.source, id: prev.id }, { hover: false })
+      map.setFeatureState({ source: sourceId, id: featureId }, { hover: true })
+      hovered[layer] = { source: sourceId, id: featureId }
+    }
+    const clearHover = (layer) => {
+      const prev = hovered[layer]
+      if (!prev) return
+      map.setFeatureState({ source: prev.source, id: prev.id }, { hover: false })
+      hovered[layer] = null
+    }
+
+    const HOVER_LAYERS = [
+      { layer: 'fires-fill',          source: 'active-fires' },
+      { layer: 'alert-zones-fill',    source: 'alert-zones' },
+      { layer: 'fire-stations-circle', source: 'fire-stations' },
+      { layer: 'reservoirs-circle',   source: 'reservoirs' },
+    ]
+    for (const { layer, source } of HOVER_LAYERS) {
+      map.on('mousemove', layer, (e) => {
+        map.getCanvas().style.cursor = 'pointer'
+        const f = e.features[0]
+        if (f?.id != null) setHover(layer, source, f.id)
+      })
+      map.on('mouseleave', layer, () => {
+        map.getCanvas().style.cursor = ''
+        clearHover(layer)
+      })
     }
 
     const firePopupHTML = (p) => {
@@ -566,6 +654,10 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
   // user clicks a different fire. Layers may not exist yet on first selection
   // (routes haven't resolved) — addEvacLayers reads the same ref to apply the
   // current filter at creation time.
+  // Also drive the active-fires `selected` feature-state so the chosen fire's
+  // outline thickens and its fill darkens — visual confirmation that the
+  // panel and the map are in sync.
+  const prevSelectedRef = useRef(null)
   useEffect(() => {
     const map = mapRef.current
     if (!map) return
@@ -573,6 +665,14 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     for (const id of ['evac-route-casing', 'evac-route-line', 'evac-dest-circle', 'evac-dest-label']) {
       if (map.getLayer(id)) map.setFilter(id, filter)
     }
+    const prev = prevSelectedRef.current
+    if (prev && prev !== selectedFireId && map.getSource('active-fires')) {
+      map.setFeatureState({ source: 'active-fires', id: prev }, { selected: false })
+    }
+    if (selectedFireId && map.getSource('active-fires')) {
+      map.setFeatureState({ source: 'active-fires', id: selectedFireId }, { selected: true })
+    }
+    prevSelectedRef.current = selectedFireId
   }, [selectedFireId])
 
   // Swap basemap on theme change; re-attach stations once the new style settles.
