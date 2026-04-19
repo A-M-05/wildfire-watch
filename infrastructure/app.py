@@ -5,6 +5,7 @@ from stacks.safety_stack import SafetyStack
 from stacks.messaging_stack import MessagingStack
 from stacks.frontend_stack import FrontendStack
 from stacks.scraper_stack import ScraperStack
+from stacks.pipeline_stack import PipelineStack
 
 app = cdk.App()
 
@@ -48,6 +49,13 @@ ScraperStack(app, "WildfireWatchScraper",
     fire_stream=core.fire_stream,
     fires_table=core.fires_table,
     description="Wildfire Watch - FIRMS + CAL FIRE poller Lambdas + EventBridge schedules (issues #6, #7)",
+)
+
+PipelineStack(app, "WildfireWatchPipeline",
+    env=env,
+    fire_stream=core.fire_stream,
+    fires_table=core.fires_table,
+    description="Wildfire Watch - Kinesis consumer Lambda (issue #8)",
 )
 
 app.synth()
