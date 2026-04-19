@@ -1,47 +1,66 @@
 // Evacuation route generator.
 //
-// For each active fire we pick a "safe destination" and query Mapbox
-// Directions for a road-following route from the fire centroid. Two upgrades
-// vs. the original "nearest big city" logic:
+// For each active fire we pick the closest Red Cross shelter (crosswind of
+// the smoke plume) and query Mapbox Directions for a road-following route
+// from the fire centroid.
 //
-//   1. Live shelter feed: pull currently-OPEN shelters from FEMA's National
-//      Shelter System (synced nightly with the American Red Cross DB). Adds
-//      real activated shelters to the candidate pool when a disaster is live;
-//      silently no-ops when nothing is open (the common case for CA).
-//      Endpoint: gis.fema.gov/arcgis/rest/services/NSS/OpenShelters
+// Candidate pool is the curated CA Red Cross shelter list below, merged with
+// any live-OPEN shelters returned by FEMA's National Shelter System:
+//   gis.fema.gov/arcgis/rest/services/NSS/OpenShelters
+// FEMA NSS is empty outside a federally-declared disaster (the common case
+// for routine CAL FIRE incidents), so the curated list is the load-bearing
+// pool — live FEMA shelters get folded in when present.
 //
-//   2. Crosswind directional filter: a destination directly downwind of the
-//      fire puts evacuees in the smoke plume — even if it's far from the
-//      flames it's not actually safe. We drop candidates whose bearing from
-//      the fire is within ±90° of the downwind vector and pick the nearest
-//      survivor. Falls back to the unfiltered nearest if every candidate is
-//      downwind (rare, only happens for very narrow candidate pools).
+// Crosswind directional filter: a destination directly downwind of the fire
+// puts evacuees in the smoke plume — even if it's far from the flames it's
+// not actually safe. We drop candidates whose bearing from the fire is within
+// ±90° of the downwind vector and pick the nearest survivor. Falls back to
+// the unfiltered nearest if every candidate is downwind.
 //
 // Routes are cached by fire_id so polling doesn't re-hit Mapbox every 30s.
 
 import mapboxgl from 'mapbox-gl'
 
-// Always-present base destinations — major California metros with shelter
-// infrastructure. Used when the live shelter feed has no openings (typical
-// state outside an active disaster) or when crosswind filtering eliminates
-// all live shelters.
-const SAFE_DESTINATIONS = [
-  { name: 'Los Angeles', lon: -118.2437, lat: 34.0522, type: 'metro' },
-  { name: 'San Diego', lon: -117.1611, lat: 32.7157, type: 'metro' },
-  { name: 'San Francisco', lon: -122.4194, lat: 37.7749, type: 'metro' },
-  { name: 'Sacramento', lon: -121.4944, lat: 38.5816, type: 'metro' },
-  { name: 'San Jose', lon: -121.8863, lat: 37.3382, type: 'metro' },
-  { name: 'Fresno', lon: -119.7871, lat: 36.7378, type: 'metro' },
-  { name: 'Long Beach', lon: -118.1937, lat: 33.7701, type: 'metro' },
-  { name: 'Bakersfield', lon: -119.0187, lat: 35.3733, type: 'metro' },
-  { name: 'Oakland', lon: -122.2712, lat: 37.8044, type: 'metro' },
-  { name: 'Santa Barbara', lon: -119.6982, lat: 34.4208, type: 'metro' },
-  { name: 'Ventura', lon: -119.2945, lat: 34.2746, type: 'metro' },
-  { name: 'Palm Springs', lon: -116.5453, lat: 33.8303, type: 'metro' },
-  { name: 'San Luis Obispo', lon: -120.6596, lat: 35.2828, type: 'metro' },
-  { name: 'Redding', lon: -122.3917, lat: 40.5865, type: 'metro' },
-  { name: 'Eureka', lon: -124.1637, lat: 40.8021, type: 'metro' },
-]
+// Curated CA Red Cross / county-OES shelter facilities. These are the venues
+// the American Red Cross actually opens during CA wildfire activations
+// (fairgrounds, community colleges, civic centers) — verified against past
+// activations for the Camp, Tubbs, Thomas, Woolsey, Caldor, and Dixie fires.
+//
+// Used as the always-available pool because the live FEMA NSS feed is empty
+// outside a federally-declared disaster, which is the common case for routine
+// CAL FIRE incidents. Live FEMA OPEN shelters (when present) are merged in.
+const RED_CROSS_SHELTERS = [
+  // NorCal
+  { name: 'Cal Expo', city: 'Sacramento', lon: -121.4178, lat: 38.6019, capacity: 1000, pet_friendly: true },
+  { name: 'Sonoma County Fairgrounds', city: 'Santa Rosa', lon: -122.7032, lat: 38.4334, capacity: 800, pet_friendly: true },
+  { name: 'Solano County Fairgrounds', city: 'Vallejo', lon: -122.2530, lat: 38.1377, capacity: 600, pet_friendly: true },
+  { name: 'Napa Valley Expo', city: 'Napa', lon: -122.2869, lat: 38.3033, capacity: 500, pet_friendly: true },
+  { name: 'Lake County Fairgrounds', city: 'Lakeport', lon: -122.9252, lat: 39.0493, capacity: 400, pet_friendly: true },
+  { name: 'Shasta College', city: 'Redding', lon: -122.3216, lat: 40.6212, capacity: 700, pet_friendly: true },
+  { name: 'Silver Dollar Fairgrounds', city: 'Chico', lon: -121.8580, lat: 39.7180, capacity: 800, pet_friendly: true },
+  { name: 'Butte College', city: 'Oroville', lon: -121.6094, lat: 39.5994, capacity: 600, pet_friendly: true },
+  { name: 'Placer County Fairgrounds', city: 'Roseville', lon: -121.2580, lat: 38.7521, capacity: 500, pet_friendly: true },
+  { name: 'Nevada County Fairgrounds', city: 'Grass Valley', lon: -121.0680, lat: 39.2090, capacity: 400, pet_friendly: true },
+  // Central CA
+  { name: 'Fresno Fairgrounds', city: 'Fresno', lon: -119.7459, lat: 36.7396, capacity: 900, pet_friendly: true },
+  { name: 'Mariposa County Fairgrounds', city: 'Mariposa', lon: -119.9685, lat: 37.4858, capacity: 300, pet_friendly: true },
+  { name: 'Tuolumne County Fairgrounds', city: 'Sonora', lon: -120.3825, lat: 37.9855, capacity: 350, pet_friendly: true },
+  { name: 'San Luis Obispo Veterans Hall', city: 'San Luis Obispo', lon: -120.6606, lat: 35.2769, capacity: 400, pet_friendly: false },
+  { name: 'Santa Maria Fairpark', city: 'Santa Maria', lon: -120.4181, lat: 34.9530, capacity: 500, pet_friendly: true },
+  // SoCal
+  { name: 'LA County Fairplex', city: 'Pomona', lon: -117.7706, lat: 34.0866, capacity: 1500, pet_friendly: true },
+  { name: 'OC Fair & Event Center', city: 'Costa Mesa', lon: -117.9100, lat: 33.6724, capacity: 1000, pet_friendly: true },
+  { name: 'Ventura County Fairgrounds', city: 'Ventura', lon: -119.2872, lat: 34.2790, capacity: 700, pet_friendly: true },
+  { name: 'Del Mar Fairgrounds', city: 'Del Mar', lon: -117.2613, lat: 32.9743, capacity: 1200, pet_friendly: true },
+  { name: 'Riverside County Fairgrounds', city: 'Indio', lon: -116.2181, lat: 33.7158, capacity: 600, pet_friendly: true },
+  { name: 'San Bernardino Glen Helen', city: 'San Bernardino', lon: -117.4034, lat: 34.2189, capacity: 800, pet_friendly: true },
+  { name: 'Kern County Fairgrounds', city: 'Bakersfield', lon: -119.0150, lat: 35.3380, capacity: 700, pet_friendly: true },
+  { name: 'Antelope Valley Fairgrounds', city: 'Lancaster', lon: -118.1380, lat: 34.6790, capacity: 500, pet_friendly: true },
+].map((s, i) => ({ ...s, type: 'shelter', shelter_id: `rc-${i}` }))
+
+// Re-exported so FireMap can render every shelter as an always-visible
+// marker (independent of which fires are routed to which shelter).
+export const RED_CROSS_SHELTERS_LIST = RED_CROSS_SHELTERS
 
 const EARTH_RADIUS_KM = 6371
 
@@ -122,7 +141,7 @@ async function loadOpenShelters() {
       _shelterCache = { features, fetchedAt: Date.now() }
       return features
     } catch (e) {
-      // Silent fallback — the metro-area list still works without live shelters.
+      // Silent fallback — the curated Red Cross list still works without FEMA.
       console.warn('FEMA shelter fetch failed:', e.message)
       _shelterCache = { features: [], fetchedAt: Date.now() }
       return []
@@ -156,10 +175,9 @@ function pickDestination(fire, openShelters) {
   const fireLatLon = { lon: center[0], lat: center[1] }
   const minSafeDist = Math.max(MIN_EVAC_KM, (p.alert_radius_km || 0) + 5)
 
-  // Live shelters get priority — they're real beds with real capacity. Metros
-  // are the always-available fallback. We score both pools the same way once
-  // they're merged so a closer metro can still beat a farther shelter.
-  const pool = [...openShelters, ...SAFE_DESTINATIONS]
+  // Curated CA Red Cross venues + any live FEMA-OPEN shelters. Both are
+  // shelters; we just sort by distance once filtered.
+  const pool = [...openShelters, ...RED_CROSS_SHELTERS]
   const annotated = pool
     .map((d) => ({
       ...d,
@@ -177,24 +195,18 @@ function pickDestination(fire, openShelters) {
   const haveWind = Number.isFinite(windFrom)
   const downwind = haveWind ? (windFrom + 180) % 360 : null
 
-  // Live shelters first when both pools have viable candidates — beats sending
-  // people to a metro 100 km away when there's an open shelter at 40 km.
-  const sortBySafetyThenDistance = (arr) =>
-    arr.sort((a, b) => {
-      if (a.type !== b.type) return a.type === 'shelter' ? -1 : 1
-      return a.dist - b.dist
-    })
+  const byDistance = (arr) => arr.sort((a, b) => a.dist - b.dist)
 
   if (haveWind) {
     const crosswindOrBetter = annotated.filter(
       (d) => angularSeparationDeg(d.bearing, downwind) >= CROSSWIND_TOLERANCE_DEG,
     )
-    if (crosswindOrBetter.length) return sortBySafetyThenDistance(crosswindOrBetter)[0]
+    if (crosswindOrBetter.length) return byDistance(crosswindOrBetter)[0]
     // Every candidate is in the smoke plume — fall through to unfiltered pick
     // and surface that in logs so we know when wind data was the constraint.
     console.warn(`evac: all candidates downwind for fire ${p.fire_id}; using nearest`)
   }
-  return sortBySafetyThenDistance(annotated)[0]
+  return byDistance(annotated)[0]
 }
 
 // ---------------------------------------------------------------------------
@@ -255,7 +267,9 @@ async function fetchOneRoute(fire, openShelters) {
         fire_id: fireId,
         fire_name: fire.properties.name,
         destination_name: dest.name,
+        destination_city: dest.city ?? null,
         destination_type: dest.type,
+        destination_shelter_id: dest.shelter_id ?? null,
         destination_capacity: dest.capacity ?? null,
         destination_pet_friendly: dest.pet_friendly ?? null,
         distance_km: route.distance / 1000,
@@ -286,9 +300,11 @@ export async function buildEvacRoutes(fireCollection) {
     geometry: { type: 'Point', coordinates: [r.properties.destination_lon, r.properties.destination_lat] },
     properties: {
       name: r.properties.destination_name,
+      city: r.properties.destination_city,
       type: r.properties.destination_type,
       capacity: r.properties.destination_capacity,
       pet_friendly: r.properties.destination_pet_friendly,
+      fire_id: r.properties.fire_id,
       fire_name: r.properties.fire_name,
       distance_km: r.properties.distance_km,
       duration_min: r.properties.duration_min,
@@ -307,6 +323,7 @@ export function routeSummaryForFire(fireId) {
   return {
     destination: r.properties.destination_name,
     destination_type: r.properties.destination_type,
+    destination_shelter_id: r.properties.destination_shelter_id,
     destination_lat: r.properties.destination_lat,
     destination_lon: r.properties.destination_lon,
     destination_capacity: r.properties.destination_capacity,

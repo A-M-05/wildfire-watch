@@ -2,7 +2,7 @@ import mapboxgl from 'mapbox-gl'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import { useEffect, useRef, useState } from 'react'
 import { fetchActiveFires, buildAlertZones } from './api/fires'
-import { buildEvacRoutes, routeSummaryForFire } from './api/evacRoutes'
+import { buildEvacRoutes, routeSummaryForFire, RED_CROSS_SHELTERS_LIST } from './api/evacRoutes'
 import { nearestReservoir, loadReservoirs, droughtSeverity } from './api/reservoirs'
 import { useFireWebSocket } from './api/websocket'
 
@@ -149,6 +149,61 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
         'circle-radius-transition': { duration: 320 },
         'circle-stroke-width-transition': { duration: 320 },
       },
+    })
+  }
+
+  // Always-visible Red Cross shelter layer — three stacked Mapbox layers:
+  //   1. red-cross-anchor    small red circle as the always-visible anchor
+  //   2. red-cross-marker    bold "+" text symbol drawing the cross shape
+  // No animations or designated-state highlight here — that lives on top of
+  // #115's evac route logic which already shows the chosen shelter via the
+  // route line + zone popup.
+  const addRedCrossLayer = (map) => {
+    for (const id of ['red-cross-anchor', 'red-cross-marker']) {
+      if (map.getLayer(id)) map.removeLayer(id)
+    }
+    if (map.getSource('red-cross-shelters')) map.removeSource('red-cross-shelters')
+
+    const data = {
+      type: 'FeatureCollection',
+      features: RED_CROSS_SHELTERS_LIST.map((s) => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
+        properties: {
+          shelter_id: s.shelter_id,
+          name: s.name,
+          city: s.city,
+          capacity: s.capacity,
+          pet_friendly: s.pet_friendly,
+        },
+      })),
+    }
+    map.addSource('red-cross-shelters', { type: 'geojson', data, promoteId: 'shelter_id' })
+    map.addLayer({
+      id: 'red-cross-anchor',
+      type: 'circle',
+      source: 'red-cross-shelters',
+      paint: {
+        'circle-radius': 8,
+        'circle-color': '#c8102e',
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': 2,
+      },
+    })
+    map.addLayer({
+      id: 'red-cross-marker',
+      type: 'symbol',
+      source: 'red-cross-shelters',
+      layout: {
+        'text-field': '+',
+        'text-font': ['DIN Pro Bold', 'Arial Unicode MS Bold'],
+        'text-size': 16,
+        'text-allow-overlap': true,
+        'text-ignore-placement': true,
+        'text-anchor': 'center',
+        'text-offset': [0, 0.05],
+      },
+      paint: { 'text-color': '#ffffff' },
     })
   }
 
@@ -459,6 +514,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       } catch (e) {
         console.warn('reservoir layer skipped:', e.message)
       }
+      addRedCrossLayer(map)
       await refreshFires(map)
     })
 
@@ -598,7 +654,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       // and is then overwritten by the halo popup — the user sees the halo
       // "winning" even when they clicked the (enlarged-on-hover) dot.
       const blockingHit = map.queryRenderedFeatures(e.point, {
-        layers: ['fires-fill', 'reservoirs-circle', 'fire-stations-circle'],
+        layers: ['fires-fill', 'reservoirs-circle', 'fire-stations-circle', 'red-cross-anchor'],
       })
       if (blockingHit.length) return
       const f = e.features[0]
@@ -635,7 +691,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       // them so the user can actually click a reservoir under a fire without
       // the fire layer hijacking the click.
       const pointHit = map.queryRenderedFeatures(e.point, {
-        layers: ['reservoirs-circle', 'fire-stations-circle'],
+        layers: ['reservoirs-circle', 'fire-stations-circle', 'red-cross-anchor'],
       })
       if (pointHit.length) return
       const f = e.features[0]
@@ -714,6 +770,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
     map.once('style.load', () => {
       if (stationsRef.current) addStationsLayer(map, stationsRef.current)
       if (reservoirsRef.current) addReservoirsLayer(map, reservoirsRef.current)
+      addRedCrossLayer(map)
       if (firesRef.current) addFiresLayer(map, firesRef.current)
       if (zonesRef.current) addAlertZonesLayer(map, zonesRef.current)
       if (routesRef.current && destsRef.current) {
