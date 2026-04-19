@@ -531,9 +531,19 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
         low: '🟢 clear',
         unknown: 'traffic unknown',
       }[route?.traffic_severity] || ''
+      const destLabel = route?.destination_type === 'shelter'
+        ? `🏠 ${route.destination}`        // live FEMA-listed shelter
+        : route?.destination               // metro fallback
+      const shelterMeta = route?.destination_type === 'shelter'
+        ? [
+            route.destination_capacity ? `cap ${route.destination_capacity}` : null,
+            route.destination_pet_friendly ? '🐾 pets OK' : null,
+          ].filter(Boolean).join(' · ')
+        : ''
       const evacLine = route
-        ? `Evac route: <strong>${route.destination}</strong> — ` +
+        ? `Evac route: <strong>${destLabel}</strong> — ` +
           `${route.distance_km.toFixed(0)} km · ${Math.round(route.duration_min)} min<br/>` +
+          (shelterMeta ? `<span style="color:#444;font-size:12px">${shelterMeta}</span><br/>` : '') +
           `<span style="color:#444;font-size:12px">${trafficLabel} (live)</span>`
         : `Evac route: computing…`
       return (
