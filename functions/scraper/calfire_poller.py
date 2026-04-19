@@ -107,7 +107,9 @@ def _normalize(feature: dict) -> dict:
         "lat": lat,
         "lon": lon,
         "perimeter_geojson": json.dumps(geometry) if geometry else None,
-        "containment_pct": float(containment_raw) / 100.0,
+        # CAL FIRE publishes a 0-100 percentage; frontend + mock data both expect
+        # 0-100 too, so pass it through without the divide-by-100 we used to do.
+        "containment_pct": float(containment_raw),
         "radiative_power": 0.0,
         "detected_at": _parse_date(
             str(props.get("StartedDateOnly") or props.get("startedDateOnly") or "")
