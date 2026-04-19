@@ -195,9 +195,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       source: 'active-fires',
       filter: ['==', ['geometry-type'], 'Polygon'],
       paint: {
-        'line-color': [
-          'case', ['boolean', ['feature-state', 'selected'], false], '#000', '#000',
-        ],
+        'line-color': '#000',
         'line-width': [
           'case',
           ['boolean', ['feature-state', 'selected'], false], 3,
@@ -565,6 +563,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       const f = e.features[0]
       if (!f) return
       e.originalEvent.__layerClick = true
+      popup._ww_fireId = null
       popup.setLngLat(f.geometry.coordinates).setHTML(stationPopupHTML(f.properties)).addTo(map)
     })
 
@@ -572,6 +571,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       const f = e.features[0]
       if (!f) return
       e.originalEvent.__layerClick = true
+      popup._ww_fireId = null
       popup.setLngLat(f.geometry.coordinates).setHTML(reservoirPopupHTML(f.properties)).addTo(map)
     })
 
@@ -627,6 +627,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       ) || f
       const sameFire = selectedFireIdRef.current === full.properties.fire_id
       onSelectFire(sameFire ? null : full)
+      popup._ww_fireId = null
       if (sameFire) {
         popup.remove()
       } else {

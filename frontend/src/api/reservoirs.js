@@ -29,7 +29,7 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 // and so every fire popup that opens during a session shares one network call.
 export function loadReservoirs() {
   if (!cachedPromise) {
-    cachedPromise = fetch(DATA_URL, { cache: 'no-store' })
+    cachedPromise = fetch(DATA_URL)
       .then((res) => {
         if (!res.ok) throw new Error(`reservoirs.json HTTP ${res.status}`)
         return res.json()
