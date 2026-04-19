@@ -393,9 +393,9 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       map.on('mouseleave', layer, hideFirePopup)
     }
 
-    // Alert-zone popup — population at risk + nearest evac route. These are
-    // client-side stubs today (api/fires.js) and will be replaced by #9's
-    // enrichment + Location Service routing once that pipeline lands.
+    // Alert-zone popup — population at risk + nearest evac route. Population
+    // and radius come from the enrichment Lambda (#9) via /fires (#105); the
+    // route summary is live Mapbox traffic data via api/evacRoutes.
     const zonePopup = new mapboxgl.Popup({ closeButton: false, offset: 8 })
     map.on('mouseenter', 'alert-zones-fill', (e) => {
       const fireHit = map.queryRenderedFeatures(e.point, { layers: ['fires-fill'] })
@@ -421,8 +421,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
           `<strong>Alert zone — ${p.name || 'fire'}</strong><br/>` +
           `Radius: ${Number(p.alert_radius_km).toFixed(1)} km<br/>` +
           `Population at risk: ~${Number(p.population_at_risk).toLocaleString()}<br/>` +
-          `${evacLine}<br/>` +
-          `<span style="color:#666;font-size:11px">Stub data — #9 enrichment pending</span>`
+          `${evacLine}`
         )
         .addTo(map)
     })
