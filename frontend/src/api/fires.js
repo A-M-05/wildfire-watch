@@ -61,9 +61,11 @@ const ELLIPSE_VERTICES = 64       // bumped so noise has room to read as fingers
 const ELLIPSE_T_MIN_HR = 0.5
 const ELLIPSE_T_MAX_HR = 24.0
 const DEG_LAT_KM = 111.0
-const ELLIPSE_LB_MAX_CALM = 3.5   // visual cap below ~15 mph wind
-const ELLIPSE_LB_MAX_WINDY = 6.0  // SoCal Santa Ana fires really do stretch this far;
-                                  // gated on wind so mild fires don't look exaggerated
+const ELLIPSE_LB_MAX_CALM = 2.0   // visual cap below ~15 mph wind. Anderson's raw
+                                  // curve hits 5+ at single-digit wind, which reads
+                                  // as a needle on the map even with cap 3.5.
+const ELLIPSE_LB_MAX_WINDY = 3.0  // Santa Ana fires can stretch further IRL but the
+                                  // demo map needs the shape to read, not the length.
 const WINDY_THRESHOLD_MPH = 15
 const NOISE_AMPLITUDE = 0.22      // ±22% baseline — heel scale, head bumps higher
 const NOISE_FREQS = [5, 11, 19]   // higher-frequency content reads as fingers, not waves

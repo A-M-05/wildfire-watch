@@ -300,10 +300,12 @@ _ELLIPSE_VERTICES = 64   # higher than the smooth-oval default so noise reads as
 _ELLIPSE_T_MIN_HR = 0.5  # floor: even brand-new fires get a visible footprint
 _ELLIPSE_T_MAX_HR = 24.0 # ceiling: stale fires shouldn't grow without bound
 _DEG_LAT_KM = 111.0      # degrees-per-km for equirectangular projection
-_ELLIPSE_LB_MAX_CALM = 3.5   # visual cap for sub-Santa-Ana winds — Anderson's
-                             # curve hits 8 at ~10 mph which reads as a needle
-_ELLIPSE_LB_MAX_WINDY = 6.0  # SoCal Santa Ana fires really do stretch this far;
-                             # gated on wind so mild fires don't look exaggerated
+_ELLIPSE_LB_MAX_CALM = 2.0   # visual cap for sub-Santa-Ana winds. Anderson's
+                             # raw curve hits 5+ at single-digit wind, which
+                             # reads as a needle on the map even with cap 3.5.
+_ELLIPSE_LB_MAX_WINDY = 3.0  # SoCal Santa Ana fires can stretch further IRL,
+                             # but the demo map is the constraint — keep them
+                             # visibly fatter so the shape, not the length, reads.
 _WINDY_THRESHOLD_MPH = 15.0
 _NOISE_AMPLITUDE = 0.22  # ±22% baseline radius warp — heel scale, head bumps higher
 _NOISE_FREQS = (5, 11, 19)        # higher-frequency content reads as fingers, not waves
