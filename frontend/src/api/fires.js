@@ -61,10 +61,22 @@ const ELLIPSE_VERTICES = 64       // bumped so noise has room to read as fingers
 const ELLIPSE_T_MIN_HR = 0.5
 const ELLIPSE_T_MAX_HR = 24.0
 const DEG_LAT_KM = 111.0
-const ELLIPSE_LB_MAX = 3.5        // visual cap — Anderson's curve hits 8 fast at
-                                  // 10 mph wind, which reads as a needle on the map
-const NOISE_AMPLITUDE = 0.22      // ±22% radius warp — irregular but still readable
-const NOISE_FREQS = [3, 5, 8]     // 3 octaves of finger-sized lobes around the ring
+const ELLIPSE_LB_MAX_CALM = 3.5   // visual cap below ~15 mph wind
+const ELLIPSE_LB_MAX_WINDY = 6.0  // SoCal Santa Ana fires really do stretch this far;
+                                  // gated on wind so mild fires don't look exaggerated
+const WINDY_THRESHOLD_MPH = 15
+const NOISE_AMPLITUDE = 0.22      // ±22% baseline — heel scale, head bumps higher
+const NOISE_FREQS = [5, 11, 19]   // higher-frequency content reads as fingers, not waves
+const NOISE_WEIGHTS = [0.5, 0.3, 0.2]
+// Asymmetric noise envelope: heel reads calm (backing fire), head gets lumpy
+// (head fire = embers + spotting) — closer to how real fires actually look.
+const HEAD_BIAS_MIN = 0.3
+const HEAD_BIAS_MAX = 1.4
+// Sharp Gaussian "spot fingers" — as if embers jumped a ridgeline ahead of the
+// main front. Concentrated in the front 90° arc and stable per fire_id.
+const SPOT_COUNT = 2
+const SPOT_AMPLITUDE = 0.5
+const SPOT_WIDTH_RAD = (12 * Math.PI) / 180
 
 // Cheap deterministic hash → seed. Same fire_id always produces the same shape
 // so the perimeter doesn't shimmer between renders.
@@ -80,7 +92,10 @@ function seedFromId(id) {
 function lengthToBreadth(windMph) {
   const u = Math.max(0, windMph)
   const lb = 0.936 * Math.exp(0.2566 * u) + 0.461 * Math.exp(-0.1548 * u) - 0.397
-  return Math.max(1.0, Math.min(lb, ELLIPSE_LB_MAX))
+  // Above the windy threshold (Santa Ana territory) we let the cigar stretch
+  // further; clipping flat would understate severity of real SoCal fires.
+  const cap = u > WINDY_THRESHOLD_MPH ? ELLIPSE_LB_MAX_WINDY : ELLIPSE_LB_MAX_CALM
+  return Math.max(1.0, Math.min(lb, cap))
 }
 
 function hoursSince(detectedAt) {
@@ -131,19 +146,30 @@ function predictedPerimeter(props) {
   // Per-fire phase offsets so noise pattern is stable but unique per fire.
   const seed = seedFromId(String(props.fire_id || `${lat},${lon}`))
   const phases = NOISE_FREQS.map((_, k) => seed * Math.PI * 2 * (k + 1.7))
+  // Spot-finger bearings concentrated in the front 90° arc (theta ∈ [π/4, 3π/4])
+  // so the bumps look like ember jumps ahead of the head, not random wobble.
+  const spotBearings = Array.from({ length: SPOT_COUNT }, (_, k) =>
+    Math.PI / 4 + (Math.PI / 2) * ((seed * (k + 3.1)) % 1.0),
+  )
 
   const cosB = Math.cos(spreadBearingRad)
   const sinB = Math.sin(spreadBearingRad)
   const ring = []
   for (let i = 0; i <= ELLIPSE_VERTICES; i++) {
     const theta = (2 * Math.PI * i) / ELLIPSE_VERTICES
-    // Sum a few sine waves around the ring → finger-shaped lobes that read as
-    // a real burn scar instead of a smooth oval.
+    // Weighted sum of high-frequency sines → fingery texture, not wavey.
     let warp = 0
     for (let k = 0; k < NOISE_FREQS.length; k++) {
-      warp += Math.sin(theta * NOISE_FREQS[k] + phases[k]) / NOISE_FREQS.length
+      warp += NOISE_WEIGHTS[k] * Math.sin(theta * NOISE_FREQS[k] + phases[k])
     }
-    const r = 1 + warp * NOISE_AMPLITUDE
+    // Front-heavy envelope: heel calm, head lumpy. Matches real fire morphology.
+    const headBias = (1 + Math.sin(theta)) / 2
+    let r = 1 + warp * NOISE_AMPLITUDE * (HEAD_BIAS_MIN + HEAD_BIAS_MAX * headBias)
+    // Spot fingers — sharp Gaussian bumps that read as ridge-jumping spotting.
+    for (let k = 0; k < spotBearings.length; k++) {
+      const d = ((theta - spotBearings[k] + Math.PI) % (2 * Math.PI)) - Math.PI
+      r += SPOT_AMPLITUDE * Math.exp(-(d * d) / (2 * SPOT_WIDTH_RAD * SPOT_WIDTH_RAD))
+    }
     const localX = bKm * Math.cos(theta) * r
     const localY = aKm * Math.sin(theta) * r
     const eastKm = localX * cosB + localY * sinB

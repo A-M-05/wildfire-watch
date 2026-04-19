@@ -300,10 +300,23 @@ _ELLIPSE_VERTICES = 64   # higher than the smooth-oval default so noise reads as
 _ELLIPSE_T_MIN_HR = 0.5  # floor: even brand-new fires get a visible footprint
 _ELLIPSE_T_MAX_HR = 24.0 # ceiling: stale fires shouldn't grow without bound
 _DEG_LAT_KM = 111.0      # degrees-per-km for equirectangular projection
-_ELLIPSE_LB_MAX = 3.5    # visual cap — Anderson's curve hits 8 at ~10 mph wind
-                         # which reads as a needle on the map
-_NOISE_AMPLITUDE = 0.22  # ±22% radius warp — irregular but still readable
-_NOISE_FREQS = (3, 5, 8) # 3 sine octaves for finger-sized lobes around the ring
+_ELLIPSE_LB_MAX_CALM = 3.5   # visual cap for sub-Santa-Ana winds — Anderson's
+                             # curve hits 8 at ~10 mph which reads as a needle
+_ELLIPSE_LB_MAX_WINDY = 6.0  # SoCal Santa Ana fires really do stretch this far;
+                             # gated on wind so mild fires don't look exaggerated
+_WINDY_THRESHOLD_MPH = 15.0
+_NOISE_AMPLITUDE = 0.22  # ±22% baseline radius warp — heel scale, head bumps higher
+_NOISE_FREQS = (5, 11, 19)        # higher-frequency content reads as fingers, not waves
+_NOISE_WEIGHTS = (0.5, 0.3, 0.2)  # base frequency dominates; harmonics add texture
+# Asymmetric envelope so the heel reads calm and the head gets lumpy spotting,
+# which is how real fires look (heel = backing fire, slow & smooth; head = embers).
+_HEAD_BIAS_MIN = 0.3
+_HEAD_BIAS_MAX = 1.4
+# Sharp Gaussian "spot fingers" — as if embers jumped a ridgeline ahead of the
+# main front. Concentrated in the front 90° arc and stable per fire_id.
+_SPOT_COUNT = 2
+_SPOT_AMPLITUDE = 0.5
+_SPOT_WIDTH_RAD = math.radians(12)
 
 # Terrain-aware spread: sample elevation around the fire and stretch the warp
 # in the uphill direction. Rule of thumb (Rothermel/Andrews): rate of spread
@@ -353,11 +366,17 @@ def _sample_uphill(lat: float, lon: float) -> tuple[float, float] | None:
 
 
 def _length_to_breadth(wind_mph: float) -> float:
-    """Anderson 1983 fire-shape ratio. Calm wind → near-circular, strong wind → cigar."""
+    """Anderson 1983 fire-shape ratio. Calm wind → near-circular, strong wind → cigar.
+
+    The visual cap is wind-gated: above ~15 mph (Santa Ana territory) we let the
+    ellipse stretch further because real SoCal fires actually do, and clipping
+    them flat would understate severity. Below the threshold we keep the tighter
+    cap so a mild fire doesn't look dramatic for no reason.
+    """
     u = max(0.0, wind_mph)
     lb = 0.936 * math.exp(0.2566 * u) + 0.461 * math.exp(-0.1548 * u) - 0.397
-    # Clamp: LB < 1 is unphysical, large LB looks like a needle on the map.
-    return max(1.0, min(lb, _ELLIPSE_LB_MAX))
+    cap = _ELLIPSE_LB_MAX_WINDY if u > _WINDY_THRESHOLD_MPH else _ELLIPSE_LB_MAX_CALM
+    return max(1.0, min(lb, cap))
 
 
 def _seed_from_id(fire_id: str) -> float:
@@ -424,11 +443,17 @@ def predicted_perimeter(fire: dict) -> dict | None:
     center_lat = lat + cy_km * deg_per_km_lat
 
     # Build the ellipse: parametric coords in local km, rotate to align major
-    # axis with the spread bearing, then project to lon/lat. A few sine octaves
-    # warp the radius so the perimeter reads as an irregular burn scar instead
-    # of a smooth oval — phases are seeded on fire_id so the shape is stable.
+    # axis with the spread bearing, then project to lon/lat. A weighted sum of
+    # high-frequency sines warps the radius so the perimeter reads as an
+    # irregular burn scar; phases are seeded on fire_id so the shape is stable.
     seed = _seed_from_id(str(fire.get("fire_id") or f"{lat},{lon}"))
     phases = [seed * 2 * math.pi * (k + 1.7) for k in range(len(_NOISE_FREQS))]
+    # Spot-finger bearings concentrated in the front 90° arc (theta ∈ [π/4, 3π/4])
+    # so the bumps look like ember jumps ahead of the head, not random wobble.
+    spot_bearings = [
+        math.pi / 4 + (math.pi / 2) * ((seed * (k + 3.1)) % 1.0)
+        for k in range(_SPOT_COUNT)
+    ]
 
     # Terrain bias — vertices facing uphill bulge out, downhill compress in.
     # Skip the sample on the SageMaker-only "current_area_km2" sentinel because
@@ -441,10 +466,19 @@ def predicted_perimeter(fire: dict) -> dict | None:
     ring = []
     for i in range(_ELLIPSE_VERTICES):
         theta = 2 * math.pi * i / _ELLIPSE_VERTICES
+        # Weighted sum: base octave dominates, harmonics add fingery texture.
         warp = sum(
-            math.sin(theta * f + phases[k]) for k, f in enumerate(_NOISE_FREQS)
-        ) / len(_NOISE_FREQS)
-        r = 1.0 + warp * _NOISE_AMPLITUDE
+            w * math.sin(theta * f + phases[k])
+            for k, (f, w) in enumerate(zip(_NOISE_FREQS, _NOISE_WEIGHTS))
+        )
+        # Front-heavy envelope: heel (theta ≈ -π/2) ≈ HEAD_BIAS_MIN of amplitude,
+        # head (theta ≈ +π/2) gets up to 1 + HEAD_BIAS_MAX. Calm heels, rough heads.
+        head_bias = (1.0 + math.sin(theta)) / 2.0
+        r = 1.0 + warp * _NOISE_AMPLITUDE * (_HEAD_BIAS_MIN + _HEAD_BIAS_MAX * head_bias)
+        # Spot fingers — sharp Gaussian bumps that read as ridge-jumping spotting.
+        for sb in spot_bearings:
+            d = ((theta - sb + math.pi) % (2 * math.pi)) - math.pi
+            r += _SPOT_AMPLITUDE * math.exp(-(d * d) / (2 * _SPOT_WIDTH_RAD ** 2))
         if uphill is not None:
             uphill_bearing, uphill_strength = uphill
             # `theta` runs counter-clockwise from local +x (east). Convert ring
