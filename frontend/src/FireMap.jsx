@@ -27,6 +27,32 @@ const STYLES = {
   dark: 'mapbox://styles/mapbox/dark-v11',
 }
 
+// Mirrors WW_CONFIDENCE_THRESHOLD from CLAUDE.md — at or above this the safety
+// gate auto-dispatches, below it Step Functions pauses for a human reviewer.
+// Keep these in sync; the badge color is the user-facing read of that gate.
+const CONFIDENCE_THRESHOLD = 0.65
+
+function modelBadgeHTML(p) {
+  // Records from CAL FIRE direct-fetch (pre-#105) won't carry these — show
+  // nothing rather than a misleading "—" so the popup stays accurate.
+  const risk = p.risk_score
+  const conf = p.confidence
+  if (risk == null && conf == null) return null
+  const parts = []
+  if (risk != null) parts.push(`Risk: ${Number(risk).toFixed(2)}`)
+  if (conf != null) {
+    const auto = Number(conf) >= CONFIDENCE_THRESHOLD
+    const label = auto ? 'auto-dispatch' : 'human review pending'
+    const bg = auto ? '#1f9d55' : '#d97706'
+    parts.push(
+      `<span style="display:inline-block;background:${bg};color:#fff;` +
+      `padding:1px 6px;border-radius:8px;font-size:11px;font-weight:600;` +
+      `margin-left:4px">${Number(conf).toFixed(2)} · ${label}</span>`,
+    )
+  }
+  return parts.join(' ')
+}
+
 export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChange, onFiresLoaded, onAlertSent }) {
   const containerRef = useRef(null)
   const mapRef = useRef(null)
@@ -353,6 +379,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
         `Containment: ${p.containment_pct}%`,
         p.acres_burned ? `Acres burned: ${Number(p.acres_burned).toLocaleString()}` : null,
         p.spread_rate_km2_per_hr ? `Spread: ${p.spread_rate_km2_per_hr} km²/hr` : null,
+        modelBadgeHTML(p),
         `<span style="color:#666;font-size:11px">Updated ${formatRelative(p.last_updated)}</span>`,
       ].filter(Boolean)
       firePopup.setLngLat(e.lngLat).setHTML(lines.join('<br/>')).addTo(map)
@@ -366,9 +393,9 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
       map.on('mouseleave', layer, hideFirePopup)
     }
 
-    // Alert-zone popup — population at risk + nearest evac route. These are
-    // client-side stubs today (api/fires.js) and will be replaced by #9's
-    // enrichment + Location Service routing once that pipeline lands.
+    // Alert-zone popup — population at risk + nearest evac route. Population
+    // and radius come from the enrichment Lambda (#9) via /fires (#105); the
+    // route summary is live Mapbox traffic data via api/evacRoutes.
     const zonePopup = new mapboxgl.Popup({ closeButton: false, offset: 8 })
     map.on('mouseenter', 'alert-zones-fill', (e) => {
       const fireHit = map.queryRenderedFeatures(e.point, { layers: ['fires-fill'] })
@@ -394,8 +421,7 @@ export default function FireMap({ selectedFire, onSelectFire, theme, onThemeChan
           `<strong>Alert zone — ${p.name || 'fire'}</strong><br/>` +
           `Radius: ${Number(p.alert_radius_km).toFixed(1)} km<br/>` +
           `Population at risk: ~${Number(p.population_at_risk).toLocaleString()}<br/>` +
-          `${evacLine}<br/>` +
-          `<span style="color:#666;font-size:11px">Stub data — #9 enrichment pending</span>`
+          `${evacLine}`
         )
         .addTo(map)
     })

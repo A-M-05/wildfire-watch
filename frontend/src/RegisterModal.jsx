@@ -235,10 +235,6 @@ export default function RegisterModal({ open, onClose, theme = 'light' }) {
             }}>
               {submitting ? 'Registering…' : 'Sign up for alerts'}
             </button>
-
-            <div style={{ fontSize: 11, color: t.textDim, textAlign: 'center' }}>
-              Stub — real Cognito + DynamoDB wiring lands in #30.
-            </div>
           </form>
         )}
       </div>
