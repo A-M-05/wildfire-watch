@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchDispatchData } from './api/dispatch'
 import { routeSummaryForFire } from './api/evacRoutes'
+import { nearestReservoir } from './api/reservoirs'
 
 // Builds a Google Maps directions deep link. Origin is set only when the user
 // has granted geolocation; otherwise we omit it and Google Maps prompts the
@@ -365,6 +366,33 @@ function ResidentView({ fire, data, t }) {
   )
 }
 
+// Drought severity → display tone for the reservoir KV value. Severe gets a
+// red badge so it stands out in the dispatcher's Incident section as a "water
+// supply may not back you up" cue when planning resource allocation.
+const RESERVOIR_TONE = {
+  severe:   { color: '#c62828', label: 'drought-elevated risk' },
+  moderate: { color: '#ef6c00', label: 'below average' },
+  normal:   { color: '#2e7d32', label: 'normal' },
+  unknown:  { color: '#666',    label: 'unknown' },
+}
+
+function useNearestReservoir(fire) {
+  const [reservoir, setReservoir] = useState(null)
+  const center = fire?.properties?.centroid
+  useEffect(() => {
+    if (!center) {
+      setReservoir(null)
+      return
+    }
+    let cancelled = false
+    nearestReservoir(center[1], center[0])
+      .then((r) => { if (!cancelled) setReservoir(r) })
+      .catch(() => { if (!cancelled) setReservoir(null) })
+    return () => { cancelled = true }
+  }, [center?.[0], center?.[1]])
+  return reservoir
+}
+
 function DispatcherView({ fire, data, t }) {
   const p = fire.properties
   // Real model confidence from #105's enriched fixture / live /fires endpoint
@@ -372,6 +400,7 @@ function DispatcherView({ fire, data, t }) {
   // when the upstream record doesn't carry a confidence field.
   const confidence = p.confidence ?? data?.confidence ?? null
   const tone = confidence != null ? dispatcherTone(confidence) : null
+  const reservoir = useNearestReservoir(fire)
   return (
     <>
       <Section t={t} title="Incident">
@@ -390,6 +419,9 @@ function DispatcherView({ fire, data, t }) {
         {p.risk_score != null ? (
           <KV t={t} k="Risk score" v={Number(p.risk_score).toFixed(2)} />
         ) : null}
+        {reservoir && (
+          <ReservoirRow t={t} reservoir={reservoir} />
+        )}
       </Section>
 
       {data && (
@@ -460,6 +492,35 @@ function Badge({ color, children }) {
       fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
       display: 'inline-block', marginBottom: 8, background: color,
     }}>{children}</div>
+  )
+}
+
+// Two-line variant of KV: reservoir name + distance on the value line, then a
+// colored chip below it for drought severity. Drought severity gets its own
+// row (rather than packing into the value) so it reads as a status, not a unit.
+function ReservoirRow({ t, reservoir }) {
+  const tone = RESERVOIR_TONE[reservoir.drought_severity] || RESERVOIR_TONE.unknown
+  return (
+    <div style={{ padding: '6px 0 4px', borderTop: `1px solid ${t.borderInset}`, marginTop: 4 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+        <span style={{ color: t.textMuted }}>Nearest reservoir</span>
+        <span style={{ color: t.textPrimary, fontWeight: 500 }}>
+          {reservoir.name}
+          <span style={{ color: t.textVeryDim, fontWeight: 400, marginLeft: 6 }}>
+            ({reservoir.distance_km.toFixed(0)} km)
+          </span>
+        </span>
+      </div>
+      <div style={{ marginTop: 4, display: 'flex', justifyContent: 'flex-end' }}>
+        <span style={{
+          background: tone.color, color: '#fff',
+          padding: '2px 8px', borderRadius: 8,
+          fontSize: 11, fontWeight: 600,
+        }}>
+          {reservoir.pct_capacity}% capacity · {tone.label}
+        </span>
+      </div>
+    </div>
   )
 }
 

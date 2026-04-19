@@ -1,0 +1,204 @@
+{
+  "fetched_at": "2026-04-19T01:23:47.103695Z",
+  "source": "California Data Exchange Center (cdec.water.ca.gov), sensor 15",
+  "reservoirs": [
+    {
+      "station": "SHA",
+      "name": "Shasta Lake",
+      "lat": 40.7187,
+      "lon": -122.4214,
+      "storage_af": 4106470,
+      "gross_pool_af": 4552000,
+      "pct_capacity": 90.2
+    },
+    {
+      "station": "CLE",
+      "name": "Trinity Lake",
+      "lat": 40.8019,
+      "lon": -122.7639,
+      "storage_af": 2242592,
+      "gross_pool_af": 2447650,
+      "pct_capacity": 91.6
+    },
+    {
+      "station": "WHI",
+      "name": "Whiskeytown Lake",
+      "lat": 40.6053,
+      "lon": -122.5361,
+      "storage_af": 211353,
+      "gross_pool_af": 241100,
+      "pct_capacity": 87.7
+    },
+    {
+      "station": "ORO",
+      "name": "Lake Oroville",
+      "lat": 39.5403,
+      "lon": -121.4861,
+      "storage_af": 3260392,
+      "gross_pool_af": 3537577,
+      "pct_capacity": 92.2
+    },
+    {
+      "station": "BLB",
+      "name": "Black Butte Lake",
+      "lat": 39.8094,
+      "lon": -122.3367,
+      "storage_af": 89626,
+      "gross_pool_af": 143679,
+      "pct_capacity": 62.4
+    },
+    {
+      "station": "FOL",
+      "name": "Folsom Lake",
+      "lat": 38.71,
+      "lon": -121.1556,
+      "storage_af": 899482,
+      "gross_pool_af": 977000,
+      "pct_capacity": 92.1
+    },
+    {
+      "station": "BUL",
+      "name": "New Bullards Bar",
+      "lat": 39.3925,
+      "lon": -121.1428,
+      "storage_af": 911214,
+      "gross_pool_af": 966103,
+      "pct_capacity": 94.3
+    },
+    {
+      "station": "ENG",
+      "name": "Englebright Lake",
+      "lat": 39.2375,
+      "lon": -121.2697,
+      "storage_af": 71832,
+      "gross_pool_af": 70000,
+      "pct_capacity": 102.6
+    },
+    {
+      "station": "BER",
+      "name": "Lake Berryessa",
+      "lat": 38.6125,
+      "lon": -122.2358,
+      "storage_af": 1530163,
+      "gross_pool_af": 1602000,
+      "pct_capacity": 95.5
+    },
+    {
+      "station": "NML",
+      "name": "New Melones Lake",
+      "lat": 37.9489,
+      "lon": -120.5267,
+      "storage_af": 1861820,
+      "gross_pool_af": 2400000,
+      "pct_capacity": 77.6
+    },
+    {
+      "station": "DNP",
+      "name": "Don Pedro Reservoir",
+      "lat": 37.7,
+      "lon": -120.4192,
+      "storage_af": 1798392,
+      "gross_pool_af": 2030000,
+      "pct_capacity": 88.6
+    },
+    {
+      "station": "HTH",
+      "name": "Hetch Hetchy",
+      "lat": 37.9486,
+      "lon": -119.7867,
+      "storage_af": 347820,
+      "gross_pool_af": 360360,
+      "pct_capacity": 96.5
+    },
+    {
+      "station": "MIL",
+      "name": "Millerton Lake",
+      "lat": 37.0006,
+      "lon": -119.6919,
+      "storage_af": 437374,
+      "gross_pool_af": 520500,
+      "pct_capacity": 84.0
+    },
+    {
+      "station": "PNF",
+      "name": "Pine Flat Reservoir",
+      "lat": 36.8306,
+      "lon": -119.3267,
+      "storage_af": 819587,
+      "gross_pool_af": 1000000,
+      "pct_capacity": 82.0
+    },
+    {
+      "station": "CMN",
+      "name": "Camanche Reservoir",
+      "lat": 38.2247,
+      "lon": -120.9647,
+      "storage_af": 349950,
+      "gross_pool_af": 417100,
+      "pct_capacity": 83.9
+    },
+    {
+      "station": "PAR",
+      "name": "Pardee Reservoir",
+      "lat": 38.2542,
+      "lon": -120.8458,
+      "storage_af": 196342,
+      "gross_pool_af": 210000,
+      "pct_capacity": 93.5
+    },
+    {
+      "station": "SNL",
+      "name": "San Luis Reservoir",
+      "lat": 37.0594,
+      "lon": -121.075,
+      "storage_af": 1776634,
+      "gross_pool_af": 2041000,
+      "pct_capacity": 87.0
+    },
+    {
+      "station": "ISB",
+      "name": "Lake Isabella",
+      "lat": 35.6464,
+      "lon": -118.4794,
+      "storage_af": 357943,
+      "gross_pool_af": 568075,
+      "pct_capacity": 63.0
+    },
+    {
+      "station": "CCH",
+      "name": "Cachuma Lake",
+      "lat": 34.5828,
+      "lon": -119.975,
+      "storage_af": 192275,
+      "gross_pool_af": 193305,
+      "pct_capacity": 99.5
+    },
+    {
+      "station": "PYM",
+      "name": "Pyramid Lake",
+      "lat": 34.6502,
+      "lon": -118.7481,
+      "storage_af": 161945,
+      "gross_pool_af": 171196,
+      "pct_capacity": 94.6
+    },
+    {
+      "station": "CAS",
+      "name": "Castaic Lake",
+      "lat": 34.5239,
+      "lon": -118.6131,
+      "storage_af": 275950,
+      "gross_pool_af": 323702,
+      "pct_capacity": 85.2
+    },
+    {
+      "station": "PRR",
+      "name": "Lake Perris",
+      "lat": 33.8556,
+      "lon": -117.1683,
+      "storage_af": 112540,
+      "gross_pool_af": 131452,
+      "pct_capacity": 85.6
+    }
+  ]
+}
